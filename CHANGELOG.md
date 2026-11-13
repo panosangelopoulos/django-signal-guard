@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased: 1.0.0
+## 1.0.0 (2026-11-13)
 
 The first stable release. From here on, the public API follows semantic
 versioning: see the [stability policy](https://panosangelopoulos.github.io/django-signal-guard/stability/).
