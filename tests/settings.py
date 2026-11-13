@@ -12,3 +12,6 @@ INSTALLED_APPS = [
 DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}}
 
 SIGNAL_GUARD = {"BYPASS": "raise"}
+
+# Django 6.1+ deprecates the implicit default mailer; older versions ignore this.
+MAILERS = {"default": {"BACKEND": "django.core.mail.backends.locmem.EmailBackend"}}
