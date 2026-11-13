@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --group dev ruff check .
+      - run: uv run --group dev ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.10", django: "5.2" }
+          - { python: "3.11", django: "5.2" }
+          - { python: "3.12", django: "5.2" }
+          - { python: "3.13", django: "5.2" }
+          - { python: "3.12", django: "6.0" }
+          - { python: "3.13", django: "6.0" }
+          - { python: "3.13", django: "6.1" }
+          - { python: "3.14", django: "6.1" }
+          - { python: "3.14", django: "main" }
+    continue-on-error: ${{ matrix.django == 'main' }}
+    name: Python ${{ matrix.python }}, Django ${{ matrix.django }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Django ${{ matrix.django }}
+        run: |
+          uv venv
+          if [ "${{ matrix.django }}" = "main" ]; then
+            uv pip install "Django @ https://github.com/django/django/archive/main.tar.gz"
+          else
+            uv pip install "Django~=${{ matrix.django }}.0"
+          fi
+          uv pip install -e . pytest pytest-django
+      - run: uv run --no-sync pytest -v
