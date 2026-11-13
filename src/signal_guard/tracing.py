@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from types import FrameType
 from typing import Any
 
+from django.db.models.signals import post_delete, post_save, pre_delete, pre_save
 from django.dispatch import Signal
 from django.dispatch.dispatcher import _make_id
 
@@ -227,6 +228,37 @@ def is_dispatching() -> bool:
     return bool(_stack.get())
 
 
+def innermost_dispatch_frame() -> FrameType | None:
+    """The frame of the send() wrapper for the signal being dispatched now."""
+    stack = _stack.get()
+    return stack[-1].frame if stack else None
+
+
+def _concrete(model: Any) -> Any:
+    meta = getattr(model, "_meta", None)
+    return getattr(meta, "concrete_model", None) or model
+
+
+def save_dispatch_for(model: type) -> str | None:
+    """ "pre_save" or "post_save" if one is being dispatched for ``model``."""
+    concrete = _concrete(model)
+    for dispatch in reversed(_stack.get()):
+        if (dispatch.signal is post_save or dispatch.signal is pre_save) and _concrete(
+            dispatch.sender
+        ) is concrete:
+            return "post_save" if dispatch.signal is post_save else "pre_save"
+    return None
+
+
+def delete_dispatch() -> tuple[str, str] | None:
+    """(signal name, object) if pre_delete or post_delete is being dispatched."""
+    for dispatch in reversed(_stack.get()):
+        if dispatch.signal is pre_delete or dispatch.signal is post_delete:
+            name = "pre_delete" if dispatch.signal is pre_delete else "post_delete"
+            return name, _target_label(dispatch.sender, dispatch.instance)
+    return None
+
+
 # --- recursion --------------------------------------------------------------
 
 
@@ -319,6 +351,8 @@ def _report_recursion(loop: tuple[_Dispatch, ...], current: _Dispatch) -> None:
     emit(
         config.recursion,
         message,
+        kind="recursion",
+        location=site.location,
         error=lambda: SignalRecursionError(message, chain=chain),
         warning=SignalRecursionWarning,
         stacklevel=site.stacklevel,

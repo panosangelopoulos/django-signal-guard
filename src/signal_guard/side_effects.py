@@ -29,11 +29,16 @@ from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
 
 from . import tracing
+from .allowance import Allowance
 from .conf import get_config
 from .exceptions import SideEffectBeforeCommitError, SideEffectBeforeCommitWarning
 from .inspection import is_first_party
-from .receivers import relative_path
-from .reporting import PASS_THROUGH_MODULES, emit, find_call_site
+from .reporting import (
+    PASS_THROUGH_MODULES,
+    emit,
+    find_call_site,
+    find_first_party_site,
+)
 
 ORIGINAL_ATTR = "__signal_guard_original__"
 
@@ -44,6 +49,32 @@ _LIBRARY_MODULES = (*PASS_THROUGH_MODULES, "django", "celery", "requests", "http
 _inside_side_effect: ContextVar[bool] = ContextVar(
     "signal_guard_inside_side_effect", default=False
 )
+
+
+class allow_side_effect(Allowance):
+    """Allow side effects before the commit, and record why.
+
+    For the rare side effect that must happen inside the transaction, such as
+    a vendor call whose refusal has to roll the delete back::
+
+        @receiver(pre_delete, sender=Subscription)
+        @allow_side_effect(reason="a refused cancel must roll the delete back")
+        def cancel_at_vendor(sender, instance, **kwargs):
+            vendor.cancel(instance.vendor_id)
+
+    Works as a context manager, a decorator on sync functions and as
+    ``async with`` in async code.
+    """
+
+    active = ContextVar("signal_guard_side_effect_allowances", default=())
+
+    def __init__(self, *, reason: str) -> None:
+        super().__init__(
+            reason=reason, example="a refused cancel must roll the delete back"
+        )
+
+    def __repr__(self) -> str:
+        return f"<allow_side_effect: {self.reason!r}>"
 
 
 @dataclass(frozen=True)
@@ -146,6 +177,7 @@ def format_message(
     alias: str,
     receiver: tracing.RunningReceiver | None,
     called_at: str | None,
+    deleting: tuple[str, str] | None = None,
 ) -> str:
     lines = [f"{what} {kind.verb} before the transaction on {alias!r} commits."]
     if receiver is not None:
@@ -154,10 +186,19 @@ def format_message(
     if called_at:
         lines.append(f"  called at  {called_at}")
     lines.append(kind.consequence)
-    lines.append(
-        "Connect the receiver with @signal_guard.receiver_on_commit, or wrap "
-        "the call in transaction.on_commit()."
-    )
+    if kind is TASK and deleting is not None:
+        signal_name, target = deleting
+        lines.append(
+            f"It runs during {signal_name} for {target}. "
+            "transaction.on_commit() alone will not fix it: after the commit "
+            "the row is gone, so the task must not re-read it. Pass the task "
+            "the values it needs, then queue it with on_commit()."
+        )
+    else:
+        lines.append(
+            "Connect the receiver with @signal_guard.receiver_on_commit, or wrap "
+            "the call in transaction.on_commit()."
+        )
     return "\n".join(lines)
 
 
@@ -173,8 +214,12 @@ def check_side_effect(
     if alias is None:
         return
 
+    if allow_side_effect.entered():
+        return
+
     receiver = tracing.current_receiver()
-    site = find_call_site(sys._getframe(0), _LIBRARY_MODULES)
+    here = sys._getframe(0)
+    site = find_call_site(here, _LIBRARY_MODULES)
     if receiver is not None:
         if any(fnmatchcase(receiver.path, p) for p in config.ignore_receivers):
             return
@@ -184,19 +229,24 @@ def check_side_effect(
     if internal and not config.check_library_calls:
         return
 
+    # Blame the project's own line, not a vendor SDK it called, when there is
+    # one inside the receiver.
+    blamed = find_first_party_site(here, tracing.innermost_dispatch_frame()) or site
     what = target.describe(args, kwargs)
-    called_at = (
-        f"{relative_path(site.filename)}:{site.lineno}" if site.filename else None
+    called_at = blamed.location
+    message = format_message(
+        what, target.kind, alias, receiver, called_at, tracing.delete_dispatch()
     )
-    message = format_message(what, target.kind, alias, receiver, called_at)
     emit(
         config.side_effects,
         message,
+        kind="side_effect",
+        location=called_at,
         error=lambda: SideEffectBeforeCommitError(
             message, call=what, receiver=receiver.path if receiver else None
         ),
         warning=SideEffectBeforeCommitWarning,
-        stacklevel=site.stacklevel,
+        stacklevel=blamed.stacklevel,
         extra={
             "signal_guard_call": what,
             "signal_guard_receiver": receiver.path if receiver else None,

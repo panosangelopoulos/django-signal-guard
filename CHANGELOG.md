@@ -1,5 +1,51 @@
 # Changelog
 
+## Unreleased
+
+Added, all off by default, to cut noise on large projects:
+
+- `LIBRARY_RECEIVERS`: `"ignore_global"` stops the bypass guard reporting
+  receivers from installed packages connected for every sender, such as
+  easy_thumbnails' and imagekit's; `"ignore"` skips all library receivers.
+- `IGNORE_HISTORICAL_MODELS`: skip bulk writes on the historical models
+  migrations use.
+- `IGNORE_CREATE_ONLY_RECEIVERS`: for `update()` and `bulk_update()`, skip
+  `post_save` receivers whose source shows they only act when `created`. A
+  heuristic.
+- `IGNORE_RECEIVER_SELF_UPDATES`: skip bulk writes a `pre_save` or
+  `post_save` receiver makes to its own model.
+
+Also added:
+
+- `allow_side_effect(reason=...)`, a context manager and decorator that
+  allows side effects before commit, like `allow_bypass` does for bulk writes.
+- A pytest plugin: `pytest --signal-guard-summary` lists reports by call
+  site, with counts and the tests that hit them. Works with pytest-xdist.
+- Log records carry `signal_guard_kind`, `signal_guard_location` and
+  `signal_guard_test` (the running pytest node id).
+- `SkippedReceiver` has `module`, `any_sender` and `create_only`.
+
+Changed (report text only; what gets reported is unchanged unless noted):
+
+- A task queued from a `pre_delete` or `post_delete` receiver is reported
+  with advice that `on_commit()` alone won't help, since the row is gone by
+  then.
+- Bypass reports mark receivers that look create-only with `[create-only?]`,
+  and say when the write runs inside a save receiver for the same model.
+- A manager or queryset that overrides `update()`, `bulk_update()` or
+  `bulk_create()` is no longer reported as the call site; the caller is, with
+  the override after "through". When the override was in an installed
+  package, these writes used to be skipped as library calls; they are now
+  reported.
+- Side-effect reports blame the first line of your own code inside the
+  receiver, not a line in a vendor SDK it called.
+
+Fixed:
+
+- Paths in reports are relative to the project even when a file was reached
+  through a symlink or another spelling of the folder, and relative to
+  `settings.BASE_DIR` when the current folder is outside it.
+
 ## 0.3.0 (2026-11-13)
 
 - Recursion tracing: a receiver that sends the same signal for the same

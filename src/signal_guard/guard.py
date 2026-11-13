@@ -11,21 +11,28 @@ from __future__ import annotations
 import functools
 import sys
 from collections.abc import Callable
-from contextlib import ContextDecorator
 from contextvars import ContextVar
+from types import FrameType
 from typing import Any
 
 from django.db.models import Model
+from django.db.models.manager import BaseManager
 from django.db.models.query import QuerySet
 from django.db.models.signals import post_save, pre_save
 
-from .conf import get_config
+from . import tracing
+from .allowance import Allowance
+from .conf import Config, get_config
 from .exceptions import SignalBypassError, SignalBypassWarning
-from .receivers import SkippedReceiver, relative_path, skipped_receivers
+from .inspection import is_first_party
+from .receivers import SkippedReceiver, skipped_receivers
 from .reporting import CallSite, emit, find_call_site
 
 GUARDED_METHODS = ("bulk_create", "bulk_update", "update")
 ORIGINAL_ATTR = "__signal_guard_original__"
+
+# The module Django gives the historical models that migrations use.
+HISTORICAL_MODULE = "__fake__"
 
 
 # True while a guarded method is running. bulk_update() calls update()
@@ -33,12 +40,9 @@ ORIGINAL_ATTR = "__signal_guard_original__"
 _inside_guarded_call: ContextVar[bool] = ContextVar(
     "signal_guard_inside_guarded_call", default=False
 )
-_allowances: ContextVar[tuple[allow_bypass, ...]] = ContextVar(
-    "signal_guard_allowances", default=()
-)
 
 
-class allow_bypass(ContextDecorator):
+class allow_bypass(Allowance):
     """Allow bulk writes that skip receivers, and record why.
 
     ::
@@ -50,42 +54,21 @@ class allow_bypass(ContextDecorator):
     functions and as ``async with`` in async code.
     """
 
+    active = ContextVar("signal_guard_allowances", default=())
+
     def __init__(self, *models: type[Model], reason: str) -> None:
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError(
-                "allow_bypass() needs a non-empty reason, for example "
-                'reason="receivers are run in bulk by reindex_orders()".'
-            )
+        super().__init__(
+            reason=reason, example="receivers are run in bulk by reindex_orders()"
+        )
         for model in models:
             if not (isinstance(model, type) and issubclass(model, Model)):
                 raise TypeError(f"allow_bypass() takes model classes, not {model!r}.")
         self.models: tuple[type[Model], ...] = models
-        self.reason = reason
 
     def covers(self, model: type[Model]) -> bool:
         if not self.models:
             return True
         return any(issubclass(model, allowed) for allowed in self.models)
-
-    # State lives only in the context variable, never on the instance, so one
-    # instance can be entered from several threads or tasks at once (as a
-    # decorator on a view, say) without them interfering.
-    def __enter__(self) -> allow_bypass:
-        _allowances.set((*_allowances.get(), self))
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        current = _allowances.get()
-        for index in range(len(current) - 1, -1, -1):
-            if current[index] is self:
-                _allowances.set(current[:index] + current[index + 1 :])
-                return
-
-    async def __aenter__(self) -> allow_bypass:
-        return self.__enter__()
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        self.__exit__(*exc_info)
 
     def __repr__(self) -> str:
         names = ", ".join(m._meta.label for m in self.models) or "all models"
@@ -93,7 +76,30 @@ class allow_bypass(ContextDecorator):
 
 
 def is_allowed(model: type[Model]) -> bool:
-    return any(allowance.covers(model) for allowance in _allowances.get())
+    return any(allowance.covers(model) for allowance in allow_bypass.entered())
+
+
+def _write_override(frame: FrameType) -> str | None:
+    """Name a project's or library's override of a guarded method, if it is one.
+
+    A manager or queryset that overrides update() (to set updated_at, say) and
+    calls super() would otherwise be blamed for every update() in the project.
+    """
+    name = frame.f_code.co_name
+    if name not in GUARDED_METHODS or not frame.f_code.co_argcount:
+        return None
+    self = frame.f_locals.get("self")
+    if isinstance(self, QuerySet | BaseManager):
+        return f"{type(self).__name__}.{name}()"
+    return None
+
+
+def _is_reported(receiver: SkippedReceiver, config: Config) -> bool:
+    if config.ignore_create_only_receivers and receiver.create_only:
+        return False
+    if config.library_receivers == "report" or is_first_party(receiver.module):
+        return True
+    return config.library_receivers == "ignore_global" and not receiver.any_sender
 
 
 def format_message(
@@ -101,6 +107,9 @@ def format_message(
     method: str,
     skipped: tuple[SkippedReceiver, ...],
     site: CallSite,
+    *,
+    inside: str | None = None,
+    running: tracing.RunningReceiver | None = None,
 ) -> str:
     count = len(skipped)
     noun = "receiver" if count == 1 else "receivers"
@@ -108,9 +117,31 @@ def format_message(
     lines = [f"QuerySet.{method}() on {model._meta.label} skips {count} {noun}:"]
     for r in skipped:
         where = f"  ({r.location})" if r.location else ""
-        lines.append(f"  {r.signal_name.ljust(width)}  {r.path}{where}")
-    if site.filename is not None:
-        lines.append(f"Called from {relative_path(site.filename)}:{site.lineno}.")
+        flag = "  [create-only?]" if r.create_only else ""
+        lines.append(f"  {r.signal_name.ljust(width)}  {r.path}{where}{flag}")
+    if site.location is not None:
+        through = f", through {site.through}" if site.through else ""
+        lines.append(f"Called from {site.location}{through}.")
+    if inside is not None:
+        who = running.path if running is not None else "a receiver"
+        lines.append(
+            f"This {method}() runs inside {who}, a {inside} receiver for "
+            f"{model._meta.label}, which usually writes this way on purpose so "
+            "it does not run itself again. Set IGNORE_RECEIVER_SELF_UPDATES "
+            "to stop reporting these."
+        )
+    create_only = sum(r.create_only for r in skipped)
+    if create_only:
+        which = (
+            "The receiver marked [create-only?] seems"
+            if create_only == 1
+            else f"The {create_only} receivers marked [create-only?] seem"
+        )
+        lines.append(
+            f"{which} to act only when created, judging by the source, and "
+            f"{method}() creates no rows. Set IGNORE_CREATE_ONLY_RECEIVERS to "
+            "skip such receivers."
+        )
     lines.append(
         "Run the receivers' work yourself, or wrap the call in "
         f'signal_guard.allow_bypass({model.__name__}, reason="...").'
@@ -127,19 +158,36 @@ def check_bypass(model: type[Model], method: str) -> None:
     config = get_config()
     if not config.enabled or config.bypass == "off" or is_allowed(model):
         return
+    if config.ignore_historical_models and model.__module__ == HISTORICAL_MODULE:
+        return
 
-    skipped = skipped_receivers(model, config.ignore_receivers)
+    skipped = tuple(
+        r
+        for r in skipped_receivers(
+            model, config.ignore_receivers, creates_rows=method == "bulk_create"
+        )
+        if _is_reported(r, config)
+    )
     if not skipped:
         return
 
-    site = find_call_site(sys._getframe(0))
+    site = find_call_site(sys._getframe(0), skip=_write_override)
     if site.internal and not config.check_library_calls:
         return
 
-    message = format_message(model, method, skipped, site)
+    inside = tracing.save_dispatch_for(model)
+    if inside is not None and config.ignore_receiver_self_updates:
+        return
+    running = tracing.current_receiver() if inside is not None else None
+
+    message = format_message(
+        model, method, skipped, site, inside=inside, running=running
+    )
     emit(
         config.bypass,
         message,
+        kind="bypass",
+        location=site.location,
         error=lambda: SignalBypassError(
             message, model=model, method=method, receivers=skipped
         ),

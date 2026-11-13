@@ -5,21 +5,23 @@ import warnings
 import httpx
 import pytest
 import requests
-from asgiref.sync import async_to_sync
+from asgiref.sync import async_to_sync, sync_to_async
 from django.core import mail
 from django.core.exceptions import ImproperlyConfigured
 from django.core.mail import send_mail, send_mass_mail
 from django.db import transaction
-from django.db.models.signals import post_delete, post_save
+from django.db.models.signals import post_delete, post_save, pre_delete
 from django.test import override_settings
 
 from signal_guard import (
     SideEffectBeforeCommitError,
     SideEffectBeforeCommitWarning,
+    allow_side_effect,
     receiver_on_commit,
     side_effects,
 )
 from signal_guard.side_effects import TASK, Target, _celery, uncommitted_alias
+from tests.fakevendor import sdk
 from tests.testapp import webhooks
 from tests.testapp.models import Invoice
 
@@ -352,3 +354,122 @@ def test_third_party_receivers_need_check_library_calls(connect):
         transaction.atomic(),
     ):
         Invoice.objects.create()
+
+
+# --- tasks queued while a row is being deleted -----------------------------
+
+
+@RAISE
+def test_task_queued_in_pre_delete_explains_on_commit_is_not_enough(
+    connect, fake_celery
+):
+    # The field bug: the task re-reads the row, which is gone once the delete
+    # commits, so it exits early and never cleans up.
+    def queue_cleanup(sender, instance, **kwargs):
+        fake_celery().delay(instance.pk)
+
+    invoice = Invoice.objects.create()
+    connect(pre_delete, queue_cleanup, sender=Invoice)
+    with pytest.raises(SideEffectBeforeCommitError) as caught:
+        invoice.delete()
+    message = str(caught.value)
+    assert f"runs during pre_delete for testapp.Invoice #{invoice.pk}" in message
+    assert "on_commit() alone will not fix it" in message
+    assert "must not re-read" in message
+    assert fake_celery.queued == []
+
+
+@RAISE
+def test_email_in_post_delete_keeps_the_usual_advice(connect):
+    invoice = Invoice.objects.create()
+    connect(post_delete, email_customer, sender=Invoice)
+    with pytest.raises(SideEffectBeforeCommitError) as caught:
+        invoice.delete()
+    assert "on_commit() alone" not in str(caught.value)
+
+
+# --- allow_side_effect ------------------------------------------------------
+
+
+@RAISE
+def test_allow_side_effect_context_manager(connect):
+    def cancel_at_vendor(sender, instance, **kwargs):
+        with allow_side_effect(reason="the delete must roll back if this fails"):
+            send_mail("cancel", "body", None, [instance.email])
+
+    connect(post_save, cancel_at_vendor, sender=Invoice)
+    with transaction.atomic():
+        Invoice.objects.create()
+    assert len(mail.outbox) == 1
+
+    # Only inside the block.
+    connect(post_save, email_customer, sender=Invoice)
+    with pytest.raises(SideEffectBeforeCommitError), transaction.atomic():
+        Invoice.objects.create()
+
+
+@RAISE
+def test_allow_side_effect_decorates_a_receiver(connect):
+    @allow_side_effect(reason="the vendor must accept before we commit")
+    def cancel_at_vendor(sender, instance, **kwargs):
+        send_mail("cancel", "body", None, [instance.email])
+
+    invoice = Invoice.objects.create()
+    connect(pre_delete, cancel_at_vendor, sender=Invoice)
+    invoice.delete()
+    assert len(mail.outbox) == 1
+
+
+@RAISE
+def test_allow_side_effect_async(connect):
+    async def create(allowed):
+        if not allowed:
+            return await sync_to_async(Invoice.objects.create)()
+        async with allow_side_effect(reason="async"):
+            return await sync_to_async(Invoice.objects.create)()
+
+    connect(post_save, email_customer, sender=Invoice)
+    with transaction.atomic():
+        async_to_sync(create)(True)
+    assert len(mail.outbox) == 1
+    with pytest.raises(SideEffectBeforeCommitError), transaction.atomic():
+        async_to_sync(create)(False)
+
+
+def test_allow_side_effect_needs_reason():
+    with pytest.raises(TypeError):
+        allow_side_effect()
+    with pytest.raises(ValueError):
+        allow_side_effect(reason=" ")
+
+
+# --- blaming first-party code ----------------------------------------------
+
+
+@override_settings(
+    SIGNAL_GUARD={"SIDE_EFFECTS": "raise", "FIRST_PARTY": ["tests.test_side_effects"]}
+)
+def test_side_effect_in_a_library_blames_the_receiver_line(connect):
+    def notify_vendor(sender, instance, **kwargs):
+        sdk.notify(instance.email)  # blamed line
+
+    connect(post_save, notify_vendor, sender=Invoice)
+    with pytest.raises(SideEffectBeforeCommitError) as caught, transaction.atomic():
+        Invoice.objects.create()
+    message = str(caught.value)
+    assert f"called at  {THIS_FILE}:" in message
+    assert "fakevendor" not in message
+
+
+@override_settings(
+    SIGNAL_GUARD={"SIDE_EFFECTS": "warn", "FIRST_PARTY": ["tests.test_side_effects"]}
+)
+def test_side_effect_in_a_library_warns_at_the_receiver_line(connect):
+    def notify_vendor(sender, instance, **kwargs):
+        sdk.notify(instance.email)
+
+    connect(post_save, notify_vendor, sender=Invoice)
+    with pytest.warns(SideEffectBeforeCommitWarning) as record, transaction.atomic():
+        Invoice.objects.create()
+    [warning] = [w for w in record if w.category is SideEffectBeforeCommitWarning]
+    assert warning.filename.endswith(THIS_FILE)

@@ -1,5 +1,7 @@
 from django.db import models
 
+from tests.fakevendor.managers import TimestampedQuerySet
+
 
 class OrderQuerySet(models.QuerySet):
     def mark_paid(self):
@@ -48,3 +50,11 @@ class Invoice(models.Model):
     """Receivers for on-commit and side-effect tests are connected per test."""
 
     email = models.CharField(max_length=100, default="customer@example.com")
+
+
+class Article(models.Model):
+    """Its queryset overrides update(); receivers are connected per test."""
+
+    touched = models.BooleanField(default=False)
+
+    objects = TimestampedQuerySet.as_manager()

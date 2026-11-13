@@ -24,6 +24,7 @@ or send the email before the transaction commits.
 [Before commit](#-side-effects-before-commit) •
 [System checks](#-system-checks) •
 [signals.lock](#-the-signal-map-and-signalslock) •
+[pytest](#-which-test-hit-it-the-pytest-plugin) •
 [Configuration](#%EF%B8%8F-configuration) •
 [How it works](#-how-it-works)
 
@@ -82,6 +83,11 @@ pip install django-signal-guard
 ```
 
 Requires **Python 3.10+** and **Django 5.2+**.
+
+With uv, add it to the project (`uv add --dev django-signal-guard`) rather
+than trying it with `uv run --with django-signal-guard`: `--with` resolves the
+package's dependencies on their own, so it can install a different Django from
+the one your project pins.
 
 ## 🚀 Quick start
 
@@ -151,6 +157,52 @@ from signal_guard import bulk_safe
 def warm_cache(sender, instance, **kwargs): ...
 ```
 
+### Cutting the noise on a large project
+
+On a big codebase most reports are about receivers you can't or needn't
+change. These settings each drop one kind. They are all off by default:
+
+```python
+SIGNAL_GUARD = {
+    # easy_thumbnails, imagekit and the like connect receivers for every
+    # model (sender=None), so every update() on every model would skip them.
+    "LIBRARY_RECEIVERS": "ignore_global",
+    # Data migrations work on historical models, which never run your
+    # receivers anyway.
+    "IGNORE_HISTORICAL_MODELS": True,
+    # post_save receivers that start with `if not created: return` (or are
+    # one `if created:` block) do nothing on update() and bulk_update().
+    "IGNORE_CREATE_ONLY_RECEIVERS": True,
+    # A post_save receiver that writes to its own model with update(), on
+    # purpose, so it doesn't run itself again.
+    "IGNORE_RECEIVER_SELF_UPDATES": True,
+}
+```
+
+- **`LIBRARY_RECEIVERS`**: `"report"` (default) reports every receiver;
+  `"ignore_global"` skips receivers from installed packages that are
+  connected for every sender, but keeps those connected to your models, such
+  as `simple_history`'s; `"ignore"` skips all receivers from installed
+  packages. What counts as yours follows `FIRST_PARTY`. To silence specific
+  receivers instead, use `IGNORE_RECEIVERS`, e.g.
+  `["easy_thumbnails.*", "imagekit.*"]`.
+- **`IGNORE_CREATE_ONLY_RECEIVERS`** is a **heuristic**: it reads the
+  receiver's source and only recognises those two shapes. Even with it off,
+  such receivers are marked `[create-only?]` in reports. `bulk_create()` still
+  reports them, since it does create rows.
+- **`IGNORE_RECEIVER_SELF_UPDATES`** only covers writes to the same model as
+  the `pre_save` / `post_save` being handled. Even with it off, the report says
+  which receiver it runs in. Bear in mind the write still skips the model's
+  *other* receivers.
+
+A manager or queryset that overrides `update()` (to set `updated_at`, say)
+and calls `super()` is not blamed for every call: the report names the line
+that called it, and the override after "through":
+
+```text
+Called from shop/views.py:42, through shop/managers.py:9 (TimestampedQuerySet.update()).
+```
+
 <details>
 <summary><b>What the guard covers, and what it doesn't</b></summary>
 
@@ -163,6 +215,8 @@ def warm_cache(sender, instance, **kwargs): ...
 - The async variants `abulk_create()`, `abulk_update()` and `aupdate()`.
 - Receivers connected to the model, and receivers connected to every sender.
 - `bulk_update()` is reported once, even though Django runs `update()` inside it.
+- Managers and querysets, yours or a library's, that override one of the
+  three methods and call `super()`: the caller is reported, not the override.
 
 **Not covered**
 
@@ -274,6 +328,32 @@ def send_confirmation(sender, instance, created, **kwargs):
 - Returns your function unchanged, so you can still call it in tests.
   `signal_map` labels these receivers `on commit`.
 
+### Tasks queued while a row is deleted
+
+A `pre_delete` or `post_delete` receiver that queues `cleanup.delay(instance.pk)`
+has a worse problem: once the delete commits the row is gone, so a task that
+re-reads it with `.objects.get(pk=...)` finds nothing and quietly does
+nothing. Moving the call to `on_commit()` doesn't help. The report says so:
+pass the task the values it needs, then queue it on commit.
+
+### When the side effect must happen first: `allow_side_effect`
+
+Sometimes the call has to happen inside the transaction, for example a
+vendor's cancel API whose refusal must roll the local delete back. Allow it
+and say why, as with `allow_bypass`:
+
+```python
+from signal_guard import allow_side_effect
+
+
+@receiver(pre_delete, sender=Subscription)
+@allow_side_effect(reason="a refused cancel must roll the delete back")
+def cancel_at_vendor(sender, instance, **kwargs):
+    vendor.cancel(instance.vendor_id)
+```
+
+It also works as a context manager and with `async with`.
+
 <details>
 <summary><b>Limits of the side-effect check</b></summary>
 
@@ -289,6 +369,8 @@ def send_confirmation(sender, instance, created, **kwargs):
   import in `ready()` or later.
 - Receivers from installed packages are skipped unless `CHECK_LIBRARY_CALLS`
   is on; `IGNORE_RECEIVERS` patterns apply too.
+- When your receiver calls a vendor SDK that makes the HTTP call, "called at"
+  is the line in your receiver, not the line inside the SDK.
 
 </details>
 
@@ -359,6 +441,37 @@ upgrade** quietly adds to your models.
 
 ---
 
+## 🧪 Which test hit it: the pytest plugin
+
+Run the suite in `log` mode with `--signal-guard-summary` to get every report
+grouped by the line it blames, with a count and the tests that hit it:
+
+```console
+$ pytest --signal-guard-summary
+...
+============================= signal-guard summary =============================
+4 reports at 2 call sites.
+
+shop/imports.py:42  bypass  3 reports in 2 tests
+    QuerySet.bulk_create() on shop.Order skips 2 receivers:
+    - shop/tests/test_imports.py::test_import_rows
+    - shop/tests/test_imports.py::test_reimport
+
+shop/signals.py:33  side_effect  1 report in 1 test
+    Celery task shop.tasks.send_order_email is queued before the transaction on 'default' commits.
+    - shop/tests/test_views.py::test_checkout
+```
+
+The plugin is installed with the package and does nothing without the flag.
+It works with `pytest-xdist`. Reports are counted in every mode, so `warn`
+and `raise` work too, but `log` lets the run reach the end.
+
+In `log` mode each record also carries `signal_guard_kind`,
+`signal_guard_location` (the blamed `path:line`) and `signal_guard_test` (the
+pytest node id, when one is running), for your own log handlers.
+
+---
+
 ## ⚙️ Configuration
 
 Every key is optional:
@@ -370,6 +483,10 @@ SIGNAL_GUARD = {
     "SIDE_EFFECTS": "warn",  # raise | warn | log | off
     "SIDE_EFFECT_CALLS": [],  # e.g. ["shop.webhooks.post"]
     "IGNORE_RECEIVERS": [],  # fnmatch patterns, e.g. ["simple_history.*"]
+    "LIBRARY_RECEIVERS": "report",  # report | ignore_global | ignore
+    "IGNORE_HISTORICAL_MODELS": False,
+    "IGNORE_CREATE_ONLY_RECEIVERS": False,
+    "IGNORE_RECEIVER_SELF_UPDATES": False,
     "CHECK_LIBRARY_CALLS": False,
     "FIRST_PARTY": None,  # e.g. ["shop", "billing"]
     "LOCK_FILE": "signals.lock",
@@ -384,6 +501,10 @@ SIGNAL_GUARD = {
 | `SIDE_EFFECTS` | `"warn"` | What to do when a receiver sends email, queues a Celery task or makes an HTTP call before the transaction commits. `raise` stops the call before it happens. |
 | `SIDE_EFFECT_CALLS` | `[]` | Dotted paths of your own functions or methods that count as side effects. A path that cannot be imported fails at startup. |
 | `IGNORE_RECEIVERS` | `[]` | Receivers whose dotted path matches one of these patterns are never reported, by any check. Handy for third-party receivers you can't change. |
+| `LIBRARY_RECEIVERS` | `"report"` | For the bypass guard: `ignore_global` skips receivers from installed packages connected for every sender (`sender=None`); `ignore` skips all receivers from installed packages. See [cutting the noise](#cutting-the-noise-on-a-large-project). |
+| `IGNORE_HISTORICAL_MODELS` | `False` | Skip bulk writes on the historical models that migrations use. |
+| `IGNORE_CREATE_ONLY_RECEIVERS` | `False` | For `update()` and `bulk_update()`, skip `post_save` receivers that only act when `created`. A heuristic, read from the source. |
+| `IGNORE_RECEIVER_SELF_UPDATES` | `False` | Skip bulk writes a `pre_save` / `post_save` receiver makes to the model it handles. |
 | `CHECK_LIBRARY_CALLS` | `False` | Also report bulk writes made inside Django or installed packages, such as the `UPDATE` behind `on_delete=SET_NULL`, and side effects in their receivers. |
 | `FIRST_PARTY` | `None` | Module prefixes of your own code. By default, anything not Django and not in site-packages counts as yours. |
 | `LOCK_FILE` | `"signals.lock"` | Where `signal_map --write` / `--check` keep the lock file. Relative paths resolve against `settings.BASE_DIR` when it exists. |

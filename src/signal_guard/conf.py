@@ -8,6 +8,7 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 MODES = ("raise", "warn", "log", "off")
+LIBRARY_RECEIVER_MODES = ("report", "ignore_global", "ignore")
 
 DEFAULTS: dict[str, object] = {
     # Install the guard at all. When False the QuerySet methods are left alone.
@@ -25,6 +26,18 @@ DEFAULTS: dict[str, object] = {
     # fnmatch patterns matched against receiver paths such as
     # "simple_history.models.HistoricalRecords.post_save".
     "IGNORE_RECEIVERS": (),
+    # Receivers from installed packages, for the bypass guard: "report" them,
+    # "ignore_global" to skip those connected for every sender (sender=None),
+    # such as easy_thumbnails' and imagekit's, or "ignore" them all.
+    "LIBRARY_RECEIVERS": "report",
+    # Skip bulk writes on the historical models that migrations use.
+    "IGNORE_HISTORICAL_MODELS": False,
+    # Skip post_save receivers that only act when created, for update() and
+    # bulk_update(), which never create rows. Found by reading the source.
+    "IGNORE_CREATE_ONLY_RECEIVERS": False,
+    # Skip bulk writes that a pre_save or post_save receiver makes to its own
+    # model, usually update() used on purpose so it does not run again.
+    "IGNORE_RECEIVER_SELF_UPDATES": False,
     # Also report bulk writes made inside Django or installed packages, such as
     # the UPDATE behind on_delete=SET_NULL. You usually cannot change that code.
     "CHECK_LIBRARY_CALLS": False,
@@ -45,6 +58,10 @@ class Config:
     side_effects: str
     side_effect_calls: tuple[str, ...]
     ignore_receivers: tuple[str, ...]
+    library_receivers: str
+    ignore_historical_models: bool
+    ignore_create_only_receivers: bool
+    ignore_receiver_self_updates: bool
     check_library_calls: bool
     first_party: tuple[str, ...] | None
     lock_file: str
@@ -75,6 +92,13 @@ def get_config() -> Config:
                 f"not {merged[key]!r}."
             )
 
+    if merged["LIBRARY_RECEIVERS"] not in LIBRARY_RECEIVER_MODES:
+        raise ImproperlyConfigured(
+            "SIGNAL_GUARD['LIBRARY_RECEIVERS'] must be one of "
+            f"{', '.join(LIBRARY_RECEIVER_MODES)}, "
+            f"not {merged['LIBRARY_RECEIVERS']!r}."
+        )
+
     ignore = _as_tuple(merged["IGNORE_RECEIVERS"])
     side_effect_calls = _as_tuple(merged["SIDE_EFFECT_CALLS"])
     first_party = merged["FIRST_PARTY"]
@@ -86,6 +110,10 @@ def get_config() -> Config:
         side_effects=str(merged["SIDE_EFFECTS"]),
         side_effect_calls=side_effect_calls,
         ignore_receivers=ignore,
+        library_receivers=str(merged["LIBRARY_RECEIVERS"]),
+        ignore_historical_models=bool(merged["IGNORE_HISTORICAL_MODELS"]),
+        ignore_create_only_receivers=bool(merged["IGNORE_CREATE_ONLY_RECEIVERS"]),
+        ignore_receiver_self_updates=bool(merged["IGNORE_RECEIVER_SELF_UPDATES"]),
         check_library_calls=bool(merged["CHECK_LIBRARY_CALLS"]),
         first_party=None if first_party is None else _as_tuple(first_party),
         lock_file=str(merged["LOCK_FILE"]),

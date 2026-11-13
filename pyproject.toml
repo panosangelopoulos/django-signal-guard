@@ -37,6 +37,9 @@ Homepage = "https://github.com/panosangelopoulos/django-signal-guard"
 Issues = "https://github.com/panosangelopoulos/django-signal-guard/issues"
 Changelog = "https://github.com/panosangelopoulos/django-signal-guard/blob/main/CHANGELOG.md"
 
+[project.entry-points.pytest11]
+signal_guard = "signal_guard.pytest_plugin"
+
 [dependency-groups]
 test = [
     "httpx>=0.28.1",
