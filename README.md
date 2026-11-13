@@ -10,10 +10,11 @@ the receivers that never get connected, and the ones that run twice.
 [![CI](https://github.com/panosangelopoulos/django-signal-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/panosangelopoulos/django-signal-guard/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-3776AB?logo=python&logoColor=white)](#-install)
 [![Django](https://img.shields.io/badge/django-5.2%20%7C%206.0%20%7C%206.1-0C4B33?logo=django&logoColor=white)](#-install)
+[![PyPI](https://img.shields.io/pypi/v/django-signal-guard?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/django-signal-guard/)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](#%EF%B8%8F-roadmap)
 [![Typed](https://img.shields.io/badge/typing-typed-blue)](https://peps.python.org/pep-0561/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-BSD--3--Clause-green)](https://github.com/panosangelopoulos/django-signal-guard/blob/main/LICENSE)
 
 [Quick start](#-quick-start) •
 [Bypass guard](#-the-bypass-guard) •
@@ -72,10 +73,6 @@ exactly as they are. It just **reports misuse**, the way
 ```bash
 pip install django-signal-guard
 ```
-
-> [!NOTE]
-> The package isn't on PyPI yet. Until the first release, install from GitHub:
-> `pip install git+https://github.com/panosangelopoulos/django-signal-guard`
 
 Requires **Python 3.10+** and **Django 5.2+**.
 
@@ -264,8 +261,7 @@ SIGNAL_GUARD = {
 | `LOCK_FILE` | `"signals.lock"` | Where `signal_map --write` / `--check` keep the lock file. Relative paths resolve against `settings.BASE_DIR` when it exists. |
 | `ENABLED` | `True` | When `False` at startup, nothing is wrapped and the checks do nothing. |
 
-> [!TIP]
-> Settings are read on every call, so `override_settings` just works in tests.
+> **Tip:** settings are read on every call, so `override_settings` just works in tests.
 
 ---
 
@@ -306,7 +302,7 @@ flowchart LR
 | 0.3 | Recursion tracing, `@receiver_on_commit`, a check for side effects before commit | 🔜 |
 | 1.0 | pytest plugin and test assertions, full documentation | 🔜 |
 
-See the [changelog](CHANGELOG.md) for details.
+See the [changelog](https://github.com/panosangelopoulos/django-signal-guard/blob/main/CHANGELOG.md) for details.
 
 ## 📚 Prior art
 
@@ -329,4 +325,4 @@ Issues and pull requests are welcome.
 
 ## 📄 License
 
-[BSD-3-Clause](LICENSE), the same as Django.
+[BSD-3-Clause](https://github.com/panosangelopoulos/django-signal-guard/blob/main/LICENSE), the same as Django.

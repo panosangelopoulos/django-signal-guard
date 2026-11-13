@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-13)
 
 - System checks, tag `signals`:
   - W001: a module defines `@receiver` functions but is never imported.
