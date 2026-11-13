@@ -29,8 +29,8 @@ the receivers that never get connected, and the ones that run twice.
 ## 💥 The problem
 
 ```python
-Order.objects.bulk_create(rows)          # post_save never fires
-Order.objects.filter(...).update(...)    # neither does pre_save
+Order.objects.bulk_create(rows)  # post_save never fires
+Order.objects.filter(...).update(...)  # neither does pre_save
 ```
 
 `bulk_create()`, `bulk_update()` and `update()` write rows **without calling
@@ -246,10 +246,10 @@ Every key is optional:
 
 ```python
 SIGNAL_GUARD = {
-    "BYPASS": "warn",              # raise | warn | log | off
-    "IGNORE_RECEIVERS": [],        # fnmatch patterns, e.g. ["simple_history.*"]
+    "BYPASS": "warn",  # raise | warn | log | off
+    "IGNORE_RECEIVERS": [],  # fnmatch patterns, e.g. ["simple_history.*"]
     "CHECK_LIBRARY_CALLS": False,
-    "FIRST_PARTY": None,           # e.g. ["shop", "billing"]
+    "FIRST_PARTY": None,  # e.g. ["shop", "billing"]
     "LOCK_FILE": "signals.lock",
     "ENABLED": True,
 }
