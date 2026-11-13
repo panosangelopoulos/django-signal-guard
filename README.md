@@ -11,7 +11,7 @@ or send the email before the transaction commits.
 [![CI](https://github.com/panosangelopoulos/django-signal-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/panosangelopoulos/django-signal-guard/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-3776AB?logo=python&logoColor=white)](#-install)
 [![Django](https://img.shields.io/badge/django-5.2%20%7C%206.0%20%7C%206.1-0C4B33?logo=django&logoColor=white)](#-install)
-[![PyPI](https://img.shields.io/pypi/v/django-signal-guard?color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/django-signal-guard/)
+[![PyPI](https://img.shields.io/pypi/v/django-signal-guard?label=pypi&color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/django-signal-guard/)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](#%EF%B8%8F-roadmap)
 [![Typed](https://img.shields.io/badge/typing-typed-blue)](https://peps.python.org/pep-0561/)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
