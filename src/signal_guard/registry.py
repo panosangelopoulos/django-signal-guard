@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 import sys
 import weakref
 from collections.abc import Callable
@@ -155,6 +156,8 @@ def _record(
     target = getattr(receiver, "__func__", receiver)
     module = getattr(target, "__module__", None) or type(target).__module__
     qualname = getattr(target, "__qualname__", None) or type(target).__qualname__
+    with contextlib.suppress(ValueError):
+        target = inspect.unwrap(target)  # @receiver_on_commit's wrapper
     code = getattr(target, "__code__", None)
     receiver_file = code.co_filename if code is not None else None
     connected_at, triggered_by = _caller_sites(receiver_file)

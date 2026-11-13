@@ -14,6 +14,14 @@ DEFAULTS: dict[str, object] = {
     "ENABLED": True,
     # What to do when a bulk write would skip receivers.
     "BYPASS": "warn",
+    # What to do when a receiver re-enters itself for the same object twice.
+    "RECURSION": "warn",
+    # What to do when a receiver sends email, queues a Celery task or makes an
+    # HTTP call inside a transaction that has not committed yet.
+    "SIDE_EFFECTS": "warn",
+    # Dotted paths of your own functions or methods that count as side
+    # effects, e.g. ["shop.webhooks.post", "shop.payments.Client.charge"].
+    "SIDE_EFFECT_CALLS": (),
     # fnmatch patterns matched against receiver paths such as
     # "simple_history.models.HistoricalRecords.post_save".
     "IGNORE_RECEIVERS": (),
@@ -33,6 +41,9 @@ DEFAULTS: dict[str, object] = {
 class Config:
     enabled: bool
     bypass: str
+    recursion: str
+    side_effects: str
+    side_effect_calls: tuple[str, ...]
     ignore_receivers: tuple[str, ...]
     check_library_calls: bool
     first_party: tuple[str, ...] | None
@@ -57,25 +68,31 @@ def get_config() -> Config:
 
     merged = {**DEFAULTS, **user}
 
-    bypass = merged["BYPASS"]
-    if bypass not in MODES:
-        raise ImproperlyConfigured(
-            f"SIGNAL_GUARD['BYPASS'] must be one of {', '.join(MODES)}, not {bypass!r}."
-        )
+    for key in ("BYPASS", "RECURSION", "SIDE_EFFECTS"):
+        if merged[key] not in MODES:
+            raise ImproperlyConfigured(
+                f"SIGNAL_GUARD[{key!r}] must be one of {', '.join(MODES)}, "
+                f"not {merged[key]!r}."
+            )
 
-    ignore = merged["IGNORE_RECEIVERS"]
-    if isinstance(ignore, str):
-        ignore = (ignore,)
-
+    ignore = _as_tuple(merged["IGNORE_RECEIVERS"])
+    side_effect_calls = _as_tuple(merged["SIDE_EFFECT_CALLS"])
     first_party = merged["FIRST_PARTY"]
-    if isinstance(first_party, str):
-        first_party = (first_party,)
 
     return Config(
         enabled=bool(merged["ENABLED"]),
-        bypass=str(bypass),
-        ignore_receivers=tuple(ignore),
+        bypass=str(merged["BYPASS"]),
+        recursion=str(merged["RECURSION"]),
+        side_effects=str(merged["SIDE_EFFECTS"]),
+        side_effect_calls=side_effect_calls,
+        ignore_receivers=ignore,
         check_library_calls=bool(merged["CHECK_LIBRARY_CALLS"]),
-        first_party=None if first_party is None else tuple(first_party),
+        first_party=None if first_party is None else _as_tuple(first_party),
         lock_file=str(merged["LOCK_FILE"]),
     )
+
+
+def _as_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, str):
+        return (value,)
+    return tuple(value)  # type: ignore[arg-type]

@@ -9,14 +9,10 @@ any live receivers that would be skipped.
 from __future__ import annotations
 
 import functools
-import logging
 import sys
-import warnings
 from collections.abc import Callable
 from contextlib import ContextDecorator
 from contextvars import ContextVar
-from dataclasses import dataclass
-from types import FrameType
 from typing import Any
 
 from django.db.models import Model
@@ -25,24 +21,12 @@ from django.db.models.signals import post_save, pre_save
 
 from .conf import get_config
 from .exceptions import SignalBypassError, SignalBypassWarning
-from .inspection import is_first_party
 from .receivers import SkippedReceiver, relative_path, skipped_receivers
-
-logger = logging.getLogger("signal_guard")
+from .reporting import CallSite, emit, find_call_site
 
 GUARDED_METHODS = ("bulk_create", "bulk_update", "update")
 ORIGINAL_ATTR = "__signal_guard_original__"
 
-# Frames that only forward a call: the manager proxy that turns
-# Order.objects.update() into a QuerySet call, this package, and the
-# machinery that runs sync code for abulk_create() and friends.
-_PASS_THROUGH_MODULES = (
-    "signal_guard",
-    "django.db.models.manager",
-    "asgiref",
-    "concurrent",
-    "threading",
-)
 
 # True while a guarded method is running. bulk_update() calls update()
 # internally, and that inner call must not be reported a second time.
@@ -112,40 +96,6 @@ def is_allowed(model: type[Model]) -> bool:
     return any(allowance.covers(model) for allowance in _allowances.get())
 
 
-@dataclass(frozen=True)
-class CallSite:
-    filename: str | None
-    lineno: int | None
-    # True when the call comes from Django or an installed package.
-    internal: bool
-    stacklevel: int
-
-
-def _module_matches(module: str, prefixes: tuple[str, ...]) -> bool:
-    return any(module == p or module.startswith(p + ".") for p in prefixes)
-
-
-def _find_call_site(start: FrameType | None) -> CallSite:
-    """Walk out from ``start`` to the code that asked for the bulk write.
-
-    ``stacklevel`` counts ``start`` as 1, matching ``warnings.warn`` and
-    ``logging`` when they are called from the function that owns ``start``.
-    """
-    frame, depth = start, 1
-    while frame is not None:
-        module = frame.f_globals.get("__name__", "")
-        if not _module_matches(module, _PASS_THROUGH_MODULES):
-            return CallSite(
-                filename=frame.f_code.co_filename,
-                lineno=frame.f_lineno,
-                internal=not is_first_party(module),
-                stacklevel=depth,
-            )
-        frame, depth = frame.f_back, depth + 1
-    # Only forwarding frames, for example a sync_to_async worker thread.
-    return CallSite(filename=None, lineno=None, internal=False, stacklevel=1)
-
-
 def format_message(
     model: type[Model],
     method: str,
@@ -182,18 +132,18 @@ def check_bypass(model: type[Model], method: str) -> None:
     if not skipped:
         return
 
-    site = _find_call_site(sys._getframe(0))
+    site = find_call_site(sys._getframe(0))
     if site.internal and not config.check_library_calls:
         return
 
     message = format_message(model, method, skipped, site)
-    if config.bypass == "raise":
-        raise SignalBypassError(message, model=model, method=method, receivers=skipped)
-    if config.bypass == "warn":
-        warnings.warn(message, SignalBypassWarning, stacklevel=site.stacklevel)
-        return
-    logger.warning(
+    emit(
+        config.bypass,
         message,
+        error=lambda: SignalBypassError(
+            message, model=model, method=method, receivers=skipped
+        ),
+        warning=SignalBypassWarning,
         stacklevel=site.stacklevel,
         extra={
             "signal_guard_model": model._meta.label,

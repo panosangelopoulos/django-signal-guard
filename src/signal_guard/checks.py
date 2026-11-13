@@ -13,6 +13,8 @@ W004  The same receiver is connected more than once to one signal and sender.
 from __future__ import annotations
 
 import ast
+import contextlib
+import inspect
 import os
 import sys
 from collections import defaultdict
@@ -82,14 +84,16 @@ def _ready_hint(module_name: str) -> str:
 
 # --- W001 -------------------------------------------------------------------
 
+_RECEIVER_DECORATORS = frozenset({"receiver", "receiver_on_commit"})
+
 
 def _is_receiver_decorator(node: ast.expr) -> bool:
     if not isinstance(node, ast.Call):
         return False
     func = node.func
     if isinstance(func, ast.Name):
-        return func.id == "receiver"
-    return isinstance(func, ast.Attribute) and func.attr == "receiver"
+        return func.id in _RECEIVER_DECORATORS
+    return isinstance(func, ast.Attribute) and func.attr in _RECEIVER_DECORATORS
 
 
 def _receiver_functions(filename: str) -> list[str]:
@@ -98,7 +102,7 @@ def _receiver_functions(filename: str) -> list[str]:
             source = fh.read()
     except (OSError, UnicodeDecodeError):
         return []
-    if "receiver" not in source:
+    if "receiver" not in source:  # also matches receiver_on_commit
         return []
     try:
         tree = ast.parse(source, filename)
@@ -263,6 +267,8 @@ def _identity(receiver: Any) -> tuple[Any, ...]:
         # Bound methods of different objects are different receivers, such as
         # ImageField.update_dimension_fields for two image fields.
         return ("method", id(receiver.__self__), id(receiver.__func__))
+    with contextlib.suppress(ValueError):
+        receiver = inspect.unwrap(receiver)  # @receiver_on_commit's wrapper
     code = getattr(receiver, "__code__", None)
     if code is None:
         return ("object", id(receiver))

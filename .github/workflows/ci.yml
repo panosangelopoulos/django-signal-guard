@@ -44,5 +44,5 @@ jobs:
           else
             uv pip install "Django~=${{ matrix.django }}.0"
           fi
-          uv pip install -e . pytest pytest-django
+          uv pip install -e . pytest pytest-django requests httpx
       - run: uv run --no-sync pytest -v
