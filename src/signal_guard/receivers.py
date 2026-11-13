@@ -42,6 +42,17 @@ def bulk_safe(func: F) -> F:
     return func
 
 
+def _is_bulk_safe(receiver: Callable[..., Any]) -> bool:
+    # inspect.unwrap: @bulk_safe may sit outside @receiver_on_commit, which
+    # connects a wrapper around the function.
+    if getattr(receiver, BULK_SAFE_ATTR, False):
+        return True
+    try:
+        return getattr(inspect.unwrap(receiver), BULK_SAFE_ATTR, False)
+    except ValueError:  # pragma: no cover - a cycle of __wrapped__
+        return False
+
+
 def live_receivers(signal: Signal, sender: type) -> list[Callable[..., Any]]:
     """Return the receivers that ``signal.send(sender)`` would call now."""
     try:
@@ -61,7 +72,7 @@ def skipped_receivers(
     found: list[SkippedReceiver] = []
     for name, signal in SAVE_SIGNALS:
         for receiver in live_receivers(signal, model):
-            if getattr(receiver, BULK_SAFE_ATTR, False):
+            if _is_bulk_safe(receiver):
                 continue
             described = describe(name, receiver)
             if any(fnmatchcase(described.path, p) for p in patterns):

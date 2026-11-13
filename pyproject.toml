@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "django-signal-guard"
-version = "0.2.0"
+version = "0.3.0"
 description = "Make Django signal failures loud: catch bulk writes that silently skip your pre_save and post_save receivers."
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -38,7 +38,12 @@ Issues = "https://github.com/panosangelopoulos/django-signal-guard/issues"
 Changelog = "https://github.com/panosangelopoulos/django-signal-guard/blob/main/CHANGELOG.md"
 
 [dependency-groups]
-test = ["pytest>=8", "pytest-django>=4.9"]
+test = [
+    "httpx>=0.28.1",
+    "pytest>=8",
+    "pytest-django>=4.9",
+    "requests>=2.34.2",
+]
 dev = [{ include-group = "test" }, "ruff>=0.8"]
 
 [tool.hatch.build.targets.wheel]

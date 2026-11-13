@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from django.db.models import Model
 
     from .receivers import SkippedReceiver
+    from .tracing import Hop
 
 
 class SignalGuardError(Exception):
@@ -34,3 +35,34 @@ class SignalBypassError(SignalGuardError):
 
 class SignalBypassWarning(UserWarning):
     """Warning category used when ``SIGNAL_GUARD['BYPASS'] == 'warn'``."""
+
+
+class SignalRecursionError(SignalGuardError):
+    """A receiver re-entered itself for the same object a second time.
+
+    ``chain`` lists each signal sent along the way, outermost first.
+    """
+
+    def __init__(self, message: str, *, chain: tuple[Hop, ...]) -> None:
+        super().__init__(message)
+        self.chain = chain
+
+
+class SignalRecursionWarning(UserWarning):
+    """Warning category used when ``SIGNAL_GUARD['RECURSION'] == 'warn'``."""
+
+
+class SideEffectBeforeCommitError(SignalGuardError):
+    """A receiver caused a side effect inside a transaction that has not committed.
+
+    Raised before the side effect happens, so nothing is sent.
+    """
+
+    def __init__(self, message: str, *, call: str, receiver: str | None) -> None:
+        super().__init__(message)
+        self.call = call
+        self.receiver = receiver
+
+
+class SideEffectBeforeCommitWarning(UserWarning):
+    """Warning category used when ``SIGNAL_GUARD['SIDE_EFFECTS'] == 'warn'``."""

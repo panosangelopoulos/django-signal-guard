@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 (2026-11-13)
+
+- Recursion tracing: a receiver that sends the same signal for the same
+  object while it is already being handled twice is reported with the whole
+  chain, such as a `post_save` receiver that calls `instance.save()`. New
+  setting `RECURSION`, `SignalRecursionError` and `SignalRecursionWarning`.
+- `@receiver_on_commit`: like `@receiver`, but runs the receiver through
+  `transaction.on_commit()` with the arguments the signal sent.
+- Side effects before commit: email, Celery tasks, `requests` and `httpx`
+  calls made by a receiver inside a transaction that has not committed are
+  reported. Transactions opened by `TestCase` do not count. New settings
+  `SIDE_EFFECTS` and `SIDE_EFFECT_CALLS`, `SideEffectBeforeCommitError` and
+  `SideEffectBeforeCommitWarning`.
+- `@bulk_safe` works on either side of `@receiver_on_commit`; system checks
+  W001 and W004, the registry and `signal_map` see through its wrapper.
+- `IGNORE_RECEIVERS` and `CHECK_LIBRARY_CALLS` apply to the new checks.
+
 ## 0.2.0 (2026-11-13)
 
 - System checks, tag `signals`:

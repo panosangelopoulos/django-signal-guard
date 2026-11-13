@@ -5,7 +5,8 @@
 **Make Django signal failures loud.**
 
 Catch the bulk writes that silently skip your `pre_save` / `post_save` receivers,<br>
-the receivers that never get connected, and the ones that run twice.
+the receivers that never get connected, run twice, loop forever,<br>
+or send the email before the transaction commits.
 
 [![CI](https://github.com/panosangelopoulos/django-signal-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/panosangelopoulos/django-signal-guard/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-3776AB?logo=python&logoColor=white)](#-install)
@@ -18,6 +19,8 @@ the receivers that never get connected, and the ones that run twice.
 
 [Quick start](#-quick-start) •
 [Bypass guard](#-the-bypass-guard) •
+[Recursion](#-recursion-tracing) •
+[Before commit](#-side-effects-before-commit) •
 [System checks](#-system-checks) •
 [signals.lock](#-the-signal-map-and-signalslock) •
 [Configuration](#%EF%B8%8F-configuration) •
@@ -63,6 +66,9 @@ exactly as they are. It just **reports misuse**, the way
 | | Feature | What it catches |
 | :---: | --- | --- |
 | 🚧 | **[Bypass guard](#-the-bypass-guard)** | Bulk writes that skip receivers: raise, warn or log. |
+| 🔁 | **[Recursion tracing](#-recursion-tracing)** | A receiver that saves its own instance and loops, with the whole chain. |
+| ⏳ | **[Before-commit check](#-side-effects-before-commit)** | Emails, Celery tasks and HTTP calls made before the transaction commits. |
+| ✅ | **[`@receiver_on_commit`](#the-fix-receiver_on_commit)** | A drop-in `@receiver` that runs after the commit. |
 | 🩺 | **[System checks](#-system-checks)** | Receivers that never run, only run in some processes, die silently, or run twice. |
 | 🔒 | **[`signals.lock`](#-the-signal-map-and-signalslock)** | A committed inventory of every receiver, checked in CI, so new receivers show up in code review. |
 
@@ -88,11 +94,11 @@ INSTALLED_APPS = [
 ]
 ```
 
-**2. Make bypasses fail your tests:**
+**2. Make every finding fail your tests:**
 
 ```python
 # settings/test.py
-SIGNAL_GUARD = {"BYPASS": "raise"}
+SIGNAL_GUARD = {"BYPASS": "raise", "RECURSION": "raise", "SIDE_EFFECTS": "raise"}
 ```
 
 **3. Add two lines to CI:**
@@ -172,6 +178,121 @@ def warm_cache(sender, instance, **kwargs): ...
 
 ---
 
+## 🔁 Recursion tracing
+
+A `post_save` receiver that calls `instance.save()` sends `post_save` again,
+which calls the receiver again. You get a `RecursionError` a thousand frames
+deep, or, worse, a loop that ends on its own after hammering the database.
+
+`django-signal-guard` traces every signal being sent. When the same signal is
+sent for the same object while it is already being handled twice, it stops
+and shows you the loop:
+
+```text
+SignalRecursionError: shop.signals.sync_total re-entered for shop.Order #12:
+  post_save  shop.Order #12 → shop.signals.sync_total  (shop/signals.py:20)
+    Order.save()  shop/signals.py:24
+  post_save  shop.Order #12 → shop.signals.sync_total  (shop/signals.py:20)
+    Order.save()  shop/signals.py:24
+  post_save  shop.Order #12  ← this send
+Stop the loop with a guard (check update_fields or a flag on the instance), or write the change with QuerySet.update().
+```
+
+- **Saving once more is fine.** The common `if created: instance.save()`
+  pattern re-enters once and stops, so it is never reported.
+- **Same row, any object.** `Order.objects.get(pk=instance.pk).save()` inside
+  the receiver is the same loop, and is caught.
+- **Cycles too.** `Order` → `Invoice` → `Order` → … shows every hop.
+- Set `"RECURSION"` to `raise`, `warn` (default), `log` or `off`.
+
+---
+
+## ⏳ Side effects before commit
+
+```python
+@receiver(post_save, sender=Order)
+def send_confirmation(sender, instance, created, **kwargs):
+    send_order_email.delay(instance.pk)  # 💥 the worker may run before COMMIT
+```
+
+Inside a transaction (`ATOMIC_REQUESTS`, `transaction.atomic()`, or Django's
+own around `delete()`), a receiver runs **before the data is committed**. The
+Celery worker looks for the order and gets `DoesNotExist`. The confirmation
+email goes out even when the transaction rolls back.
+
+`django-signal-guard` reports these calls when a receiver makes them inside a
+transaction that has not committed:
+
+| Side effect | Calls that are checked |
+| --- | --- |
+| 📧 Email | `send_mail()`, `EmailMessage.send()`, `mail_admins()`, `send_mass_mail()` |
+| 🥬 Celery | `Task.delay()`, `Task.apply_async()` (when Celery is installed) |
+| 🌐 HTTP | `requests`, `httpx` (sync and async clients), when installed |
+| 🧩 Your own | Any function or method listed in `SIDE_EFFECT_CALLS` |
+
+```text
+SideEffectBeforeCommitError: Celery task shop.tasks.send_order_email is queued before the transaction on 'default' commits.
+  receiver   shop.signals.send_confirmation  (shop/signals.py:30)
+  called at  shop/signals.py:33
+A worker can run it before the row is committed, and it still runs if the transaction rolls back.
+Connect the receiver with @signal_guard.receiver_on_commit, or wrap the call in transaction.on_commit().
+```
+
+The transaction that `TestCase` (and `pytest.mark.django_db`) wraps each test
+in does not count: in production that code runs in autocommit mode. Your own
+`transaction.atomic()` blocks inside a test do count.
+
+```python
+SIGNAL_GUARD = {
+    "SIDE_EFFECTS": "warn",  # raise | warn | log | off
+    "SIDE_EFFECT_CALLS": ["shop.webhooks.post", "shop.payments.Client.charge"],
+}
+```
+
+### The fix: `@receiver_on_commit`
+
+A drop-in replacement for `@receiver` that hands the call to
+`transaction.on_commit()`:
+
+```python
+from signal_guard import receiver_on_commit
+
+
+@receiver_on_commit(post_save, sender=Order)
+def send_confirmation(sender, instance, created, **kwargs):
+    if created:
+        send_order_email.delay(instance.pk)  # ✅ the row is committed now
+```
+
+- The receiver gets **exactly the arguments the signal sent**.
+- **Rolled back? It never runs.** Outside a transaction it runs at once.
+- It uses the database the signal names in `using` (model signals do), or
+  `using=` you pass, or the default database.
+- Takes `sender`, `weak`, `dispatch_uid`, a list of signals, and `robust=True`
+  to log an exception instead of stopping the other commit callbacks.
+- Returns your function unchanged, so you can still call it in tests.
+  `signal_map` labels these receivers `on commit`.
+
+<details>
+<summary><b>Limits of the side-effect check</b></summary>
+
+<br>
+
+- Only calls made while a **signal receiver** is running are checked. A view
+  that sends email inside `atomic()` is out of scope.
+- Calls are wrapped when Django starts. Code that ran
+  `from django.core.mail import send_mass_mail` before then keeps the
+  unwrapped function. `send_mail()` and `EmailMessage.send()` are always
+  covered. The same goes for `SIDE_EFFECT_CALLS` functions imported by name
+  before `signal_guard` is ready, so list functions that your receivers
+  import in `ready()` or later.
+- Receivers from installed packages are skipped unless `CHECK_LIBRARY_CALLS`
+  is on; `IGNORE_RECEIVERS` patterns apply too.
+
+</details>
+
+---
+
 ## 🩺 System checks
 
 ```bash
@@ -244,6 +365,9 @@ Every key is optional:
 ```python
 SIGNAL_GUARD = {
     "BYPASS": "warn",  # raise | warn | log | off
+    "RECURSION": "warn",  # raise | warn | log | off
+    "SIDE_EFFECTS": "warn",  # raise | warn | log | off
+    "SIDE_EFFECT_CALLS": [],  # e.g. ["shop.webhooks.post"]
     "IGNORE_RECEIVERS": [],  # fnmatch patterns, e.g. ["simple_history.*"]
     "CHECK_LIBRARY_CALLS": False,
     "FIRST_PARTY": None,  # e.g. ["shop", "billing"]
@@ -255,11 +379,14 @@ SIGNAL_GUARD = {
 | Key | Default | Description |
 | --- | --- | --- |
 | `BYPASS` | `"warn"` | `raise` stops the write with `SignalBypassError` **before anything reaches the database**. `warn` emits a `SignalBypassWarning`. `log` writes to the `signal_guard` logger. `off` does nothing. |
-| `IGNORE_RECEIVERS` | `[]` | Receivers whose dotted path matches one of these patterns are never reported. Handy for third-party receivers you can't change. |
-| `CHECK_LIBRARY_CALLS` | `False` | Also report bulk writes made inside Django or installed packages, such as the `UPDATE` behind `on_delete=SET_NULL`. |
+| `RECURSION` | `"warn"` | What to do when a receiver re-enters itself for the same object twice. `raise` stops before the third run. |
+| `SIDE_EFFECTS` | `"warn"` | What to do when a receiver sends email, queues a Celery task or makes an HTTP call before the transaction commits. `raise` stops the call before it happens. |
+| `SIDE_EFFECT_CALLS` | `[]` | Dotted paths of your own functions or methods that count as side effects. A path that cannot be imported fails at startup. |
+| `IGNORE_RECEIVERS` | `[]` | Receivers whose dotted path matches one of these patterns are never reported, by any check. Handy for third-party receivers you can't change. |
+| `CHECK_LIBRARY_CALLS` | `False` | Also report bulk writes made inside Django or installed packages, such as the `UPDATE` behind `on_delete=SET_NULL`, and side effects in their receivers. |
 | `FIRST_PARTY` | `None` | Module prefixes of your own code. By default, anything not Django and not in site-packages counts as yours. |
 | `LOCK_FILE` | `"signals.lock"` | Where `signal_map --write` / `--check` keep the lock file. Relative paths resolve against `settings.BASE_DIR` when it exists. |
-| `ENABLED` | `True` | When `False` at startup, nothing is wrapped and the checks do nothing. |
+| `ENABLED` | `True` | When `False` at startup, nothing is wrapped and every check does nothing. |
 
 > **Tip:** settings are read on every call, so `override_settings` just works in tests.
 
@@ -282,6 +409,15 @@ flowchart LR
   and `update`. Before each write it asks Django's dispatcher which `pre_save`
   and `post_save` receivers are live for the model, drops those marked
   `@bulk_safe` or matching `IGNORE_RECEIVERS`, and reports the rest.
+- **Tracing.** It wraps `Signal.send()`, `send_robust()`, `asend()` and
+  `asend_robust()` to keep a per-context stack of the signals being sent.
+  Recursion is a match on that stack; the receiver at each hop is found by
+  walking Python frames, only when something is reported. Each send costs
+  under a microsecond more, small next to the database write behind it.
+- **Side effects.** At startup it wraps the email, Celery, HTTP and
+  `SIDE_EFFECT_CALLS` functions. Each call first asks: is a receiver running,
+  and is a transaction open that `TestCase` did not open? Only then does it
+  look up the receiver and report.
 - **Registry.** It wraps `Signal.connect()` and `disconnect()` to record where
   and when each receiver was connected. It holds only weak references, so it
   never keeps a receiver alive. That's why `signal_guard` should come **first**
@@ -299,7 +435,7 @@ flowchart LR
 | --- | --- | :---: |
 | 0.1 | Bypass guard | ✅ |
 | 0.2 | System checks W001–W004, `manage.py signal_map`, `signals.lock` | ✅ |
-| 0.3 | Recursion tracing, `@receiver_on_commit`, a check for side effects before commit | 🔜 |
+| 0.3 | Recursion tracing, `@receiver_on_commit`, a check for side effects before commit | ✅ |
 | 1.0 | pytest plugin and test assertions, full documentation | 🔜 |
 
 See the [changelog](https://github.com/panosangelopoulos/django-signal-guard/blob/main/CHANGELOG.md) for details.

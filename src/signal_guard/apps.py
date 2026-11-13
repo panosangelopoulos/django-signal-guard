@@ -1,6 +1,6 @@
 from django.apps import AppConfig
 
-from . import registry
+from . import registry, side_effects, tracing
 from .conf import get_config
 from .guard import install
 
@@ -18,7 +18,10 @@ class SignalGuardConfig(AppConfig):
         from . import checks  # noqa: F401 - registers the system checks
 
         # Validate settings at startup so a typo fails fast.
-        if get_config().enabled:
+        config = get_config()
+        if config.enabled:
             install()
+            tracing.install()
+            side_effects.install(config.side_effect_calls)
         else:
             registry.uninstall()

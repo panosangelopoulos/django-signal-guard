@@ -36,3 +36,15 @@ class Event(models.Model):
     """Only a receiver that tests ignore with IGNORE_RECEIVERS."""
 
     kind = models.CharField(max_length=50)
+
+
+class Counter(models.Model):
+    """Receivers for recursion tests are connected per test."""
+
+    value = models.IntegerField(default=0)
+
+
+class Invoice(models.Model):
+    """Receivers for on-commit and side-effect tests are connected per test."""
+
+    email = models.CharField(max_length=100, default="customer@example.com")
