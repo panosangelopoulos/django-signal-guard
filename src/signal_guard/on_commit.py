@@ -24,8 +24,6 @@ def receiver_on_commit(
 ) -> Callable[[F], F]:
     """Connect a receiver that runs after the current transaction commits.
 
-    ::
-
         @receiver_on_commit(post_save, sender=Order)
         def send_confirmation(sender, instance, created, **kwargs):
             if created:

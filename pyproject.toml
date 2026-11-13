@@ -12,14 +12,15 @@ license-files = ["LICENSE"]
 authors = [{ name = "Panos Angelopoulos" }]
 requires-python = ">=3.10"
 dependencies = ["Django>=5.2"]
-keywords = ["django", "signals", "post_save", "bulk_create", "linting", "testing"]
+keywords = ["django", "signals", "post_save", "bulk_create", "linting", "testing", "pytest"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Web Environment",
     "Framework :: Django",
     "Framework :: Django :: 5.2",
     "Framework :: Django :: 6.0",
     "Framework :: Django :: 6.1",
+    "Framework :: Pytest",
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -34,6 +35,7 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/panosangelopoulos/django-signal-guard"
+Documentation = "https://panosangelopoulos.github.io/django-signal-guard/"
 Issues = "https://github.com/panosangelopoulos/django-signal-guard/issues"
 Changelog = "https://github.com/panosangelopoulos/django-signal-guard/blob/main/CHANGELOG.md"
 
@@ -45,9 +47,15 @@ test = [
     "httpx>=0.28.1",
     "pytest>=8",
     "pytest-django>=4.9",
+    "pytest-xdist>=3.6",
     "requests>=2.34.2",
 ]
-dev = [{ include-group = "test" }, "ruff>=0.8"]
+docs = [
+    "mkdocs>=1.6,<2",
+    "mkdocs-material>=9.6,<10",
+    "mkdocstrings[python]>=1.0,<2",
+]
+dev = [{ include-group = "test" }, { include-group = "docs" }, "ruff>=0.8"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/signal_guard"]

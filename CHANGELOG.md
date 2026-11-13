@@ -1,5 +1,48 @@
 # Changelog
 
+## Unreleased: 1.0.0
+
+The first stable release. From here on, the public API follows semantic
+versioning: see the [stability policy](https://panosangelopoulos.github.io/django-signal-guard/stability/).
+
+Changed defaults (see [upgrading to 1.0](https://panosangelopoulos.github.io/django-signal-guard/upgrading/)):
+
+- `LIBRARY_RECEIVERS` is now `"ignore_global"`: receivers from installed
+  packages connected for every sender (easy_thumbnails, imagekit and the
+  like) no longer make every bulk write report. Set `"report"` for the 0.x
+  behaviour.
+- `IGNORE_HISTORICAL_MODELS` is now `True`: bulk writes in data migrations
+  are not checked. Set `False` for the 0.x behaviour.
+
+Added:
+
+- `signal_guard.testing`, assertions for tests:
+  - `capture_reports()`, `assert_no_reports()`, `assert_bypass()`,
+    `assert_side_effect()` and `assert_recursion()`, which collect reports
+    instead of raising, warning or logging them;
+  - `capture_signals()`, `assert_sent()` and `assert_not_sent()`, which
+    record the signals sent and their arguments;
+  - `assert_connected()` and `assert_not_connected()`;
+  - pytest fixtures `signal_reports` and `sent_signals`, and
+    `SignalGuardAssertionsMixin` for `unittest` test cases.
+- A baseline for adopting the guard on an existing codebase:
+  `pytest --signal-guard-baseline=FILE` silences the reports listed in FILE
+  and fails the run on new ones; `--signal-guard-update-baseline` writes it.
+  Also as the `signal_guard_baseline` ini option. Works with pytest-xdist.
+- Reports carry `where` (`path::function`), a stable `fingerprint` and the
+  `error` with structured details.
+- `benchmarks/overhead.py`, run in CI, measures what each wrapper adds.
+- Documentation at https://panosangelopoulos.github.io/django-signal-guard/.
+
+Changed:
+
+- Settings are read once and again when `setting_changed` is sent (as by
+  `override_settings` and pytest-django's `settings` fixture), instead of on
+  every call. A bulk write on a model with receivers costs about 2 µs less.
+- Bulk writes on models without save receivers skip the guard sooner.
+- The package's own modules never count as first-party, even when installed
+  in editable mode.
+
 ## 0.4.0 (2026-11-13)
 
 Added, all off by default, to cut noise on large projects:

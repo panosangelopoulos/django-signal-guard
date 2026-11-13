@@ -24,6 +24,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import Any
+from urllib.parse import urlsplit
 
 from django.core.exceptions import ImproperlyConfigured
 from django.db import connections
@@ -55,7 +56,7 @@ class allow_side_effect(Allowance):
     """Allow side effects before the commit, and record why.
 
     For the rare side effect that must happen inside the transaction, such as
-    a vendor call whose refusal has to roll the delete back::
+    a vendor call whose refusal has to roll the delete back:
 
         @receiver(pre_delete, sender=Subscription)
         @allow_side_effect(reason="a refused cancel must roll the delete back")
@@ -123,6 +124,26 @@ def _httpx(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     return f"HTTP {getattr(request, 'method', '?')} {getattr(request, 'url', '?')}"
 
 
+def _http_key(method: object, url: object) -> str:
+    host = urlsplit(str(url)).netloc or str(url)
+    return f"HTTP {str(method).upper()} {host}"
+
+
+def _requests_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    method = args[1] if len(args) > 1 else kwargs.get("method", "?")
+    url = args[2] if len(args) > 2 else kwargs.get("url", "?")
+    return _http_key(method, url)
+
+
+def _httpx_key(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    request = args[1] if len(args) > 1 else kwargs.get("request")
+    return _http_key(getattr(request, "method", "?"), getattr(request, "url", "?"))
+
+
+def _same(text: str) -> Callable[[tuple[Any, ...], dict[str, Any]], str]:
+    return lambda args, kwargs: text
+
+
 @dataclass(frozen=True)
 class Target:
     path: str  # dotted path of the function or method to wrap
@@ -130,15 +151,25 @@ class Target:
     describe: Callable[[tuple[Any, ...], dict[str, Any]], str]
     # Only wrapped when its top-level package is installed.
     optional: bool = False
+    # Like describe, without addresses, URLs or ids. Defaults to describe.
+    key: Callable[[tuple[Any, ...], dict[str, Any]], str] | None = None
 
 
 BUILTIN_TARGETS = (
-    Target("django.core.mail.message.EmailMessage.send", EMAIL, _email),
+    Target(
+        "django.core.mail.message.EmailMessage.send", EMAIL, _email, key=_same("Email")
+    ),
     Target("django.core.mail.send_mass_mail", EMAIL, _mass_email),
     Target("celery.app.task.Task.apply_async", TASK, _celery, optional=True),
-    Target("requests.sessions.Session.request", HTTP, _requests, optional=True),
-    Target("httpx.Client.send", HTTP, _httpx, optional=True),
-    Target("httpx.AsyncClient.send", HTTP, _httpx, optional=True),
+    Target(
+        "requests.sessions.Session.request",
+        HTTP,
+        _requests,
+        optional=True,
+        key=_requests_key,
+    ),
+    Target("httpx.Client.send", HTTP, _httpx, optional=True, key=_httpx_key),
+    Target("httpx.AsyncClient.send", HTTP, _httpx, optional=True, key=_httpx_key),
 )
 
 
@@ -237,16 +268,17 @@ def check_side_effect(
     message = format_message(
         what, target.kind, alias, receiver, called_at, tracing.delete_dispatch()
     )
+    key = (target.key or target.describe)(args, kwargs)
     emit(
         config.side_effects,
         message,
         kind="side_effect",
-        location=called_at,
+        site=blamed,
+        fingerprint=f"{receiver.path}: {key}" if receiver else key,
         error=lambda: SideEffectBeforeCommitError(
             message, call=what, receiver=receiver.path if receiver else None
         ),
         warning=SideEffectBeforeCommitWarning,
-        stacklevel=blamed.stacklevel,
         extra={
             "signal_guard_call": what,
             "signal_guard_receiver": receiver.path if receiver else None,

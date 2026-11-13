@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+from django.core.signals import setting_changed
 
 MODES = ("raise", "warn", "log", "off")
 LIBRARY_RECEIVER_MODES = ("report", "ignore_global", "ignore")
@@ -26,12 +27,12 @@ DEFAULTS: dict[str, object] = {
     # fnmatch patterns matched against receiver paths such as
     # "simple_history.models.HistoricalRecords.post_save".
     "IGNORE_RECEIVERS": (),
-    # Receivers from installed packages, for the bypass guard: "report" them,
-    # "ignore_global" to skip those connected for every sender (sender=None),
-    # such as easy_thumbnails' and imagekit's, or "ignore" them all.
-    "LIBRARY_RECEIVERS": "report",
+    # Receivers from installed packages, for the bypass guard: "report" them
+    # all, "ignore_global" to skip those connected for every sender
+    # (sender=None), such as easy_thumbnails' and imagekit's, or "ignore" them.
+    "LIBRARY_RECEIVERS": "ignore_global",
     # Skip bulk writes on the historical models that migrations use.
-    "IGNORE_HISTORICAL_MODELS": False,
+    "IGNORE_HISTORICAL_MODELS": True,
     # Skip post_save receivers that only act when created, for update() and
     # bulk_update(), which never create rows. Found by reading the source.
     "IGNORE_CREATE_ONLY_RECEIVERS": False,
@@ -67,11 +68,33 @@ class Config:
     lock_file: str
 
 
+_cached: Config | None = None
+
+
 def get_config() -> Config:
     """Return the current configuration.
 
-    Settings are read on every call so ``override_settings`` works in tests.
+    Read once, and again whenever Django sends ``setting_changed`` for
+    ``SIGNAL_GUARD``, as ``override_settings`` and pytest-django's
+    ``settings`` fixture do.
     """
+    global _cached
+    config = _cached
+    if config is None:
+        config = _cached = _read_config()
+    return config
+
+
+def _clear_cache(*, setting: str, **kwargs: object) -> None:
+    global _cached
+    if setting == "SIGNAL_GUARD":
+        _cached = None
+
+
+setting_changed.connect(_clear_cache, dispatch_uid="signal_guard.conf")
+
+
+def _read_config() -> Config:
     user = getattr(settings, "SIGNAL_GUARD", None) or {}
     if not isinstance(user, dict):
         raise ImproperlyConfigured("SIGNAL_GUARD must be a dict.")

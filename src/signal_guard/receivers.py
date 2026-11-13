@@ -32,6 +32,12 @@ SAVE_SIGNALS: tuple[tuple[str, Signal], ...] = (
 
 @dataclass(frozen=True)
 class SkippedReceiver:
+    """A receiver a bulk write skips, as listed in ``SignalBypassError.receivers``.
+
+    ``path`` is its dotted path, ``location`` the ``file:line`` it is
+    defined at, when known.
+    """
+
     signal_name: str
     path: str
     location: str | None

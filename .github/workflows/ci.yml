@@ -14,6 +14,22 @@ jobs:
       - run: uv run --group dev ruff check .
       - run: uv run --group dev ruff format --check .
 
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.13"
+      # Numbers only: shared runners are too noisy for a pass/fail threshold.
+      - name: Measure overhead
+        run: |
+          {
+            echo "## django-signal-guard overhead"
+            echo
+            uv run --group test python benchmarks/overhead.py
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -44,5 +60,5 @@ jobs:
           else
             uv pip install "Django~=${{ matrix.django }}.0"
           fi
-          uv pip install -e . pytest pytest-django requests httpx
+          uv pip install -e . pytest pytest-django pytest-xdist requests httpx
       - run: uv run --no-sync pytest -v

@@ -301,3 +301,17 @@ def test_install_is_idempotent_and_reversible():
     finally:
         install()
     assert is_installed()
+
+
+def test_config_is_cached_and_follows_override_settings():
+    from signal_guard.conf import get_config
+
+    assert get_config() is get_config()
+    with override_settings(SIGNAL_GUARD={"BYPASS": "log"}):
+        assert get_config().bypass == "log"
+    assert get_config().bypass == "raise"
+
+
+def test_settings_fixture_changes_are_seen(settings):
+    settings.SIGNAL_GUARD = {"BYPASS": "off"}
+    Order.objects.bulk_create([Order()])

@@ -45,8 +45,6 @@ _inside_guarded_call: ContextVar[bool] = ContextVar(
 class allow_bypass(Allowance):
     """Allow bulk writes that skip receivers, and record why.
 
-    ::
-
         with allow_bypass(Order, reason="import reindexes in one batch"):
             Order.objects.bulk_create(rows)
 
@@ -183,16 +181,17 @@ def check_bypass(model: type[Model], method: str) -> None:
     message = format_message(
         model, method, skipped, site, inside=inside, running=running
     )
+    paths = ", ".join(sorted(r.path for r in skipped))
     emit(
         config.bypass,
         message,
         kind="bypass",
-        location=site.location,
+        site=site,
+        fingerprint=f"{model._meta.label}.{method}() skips {paths}",
         error=lambda: SignalBypassError(
             message, model=model, method=method, receivers=skipped
         ),
         warning=SignalBypassWarning,
-        stacklevel=site.stacklevel,
         extra={
             "signal_guard_model": model._meta.label,
             "signal_guard_method": method,
@@ -204,6 +203,11 @@ def check_bypass(model: type[Model], method: str) -> None:
 def _make_guarded(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(original)
     def guarded(self: QuerySet, *args: Any, **kwargs: Any) -> Any:
+        model = self.model
+        # Fast path: a model without save receivers has nothing to report,
+        # here or in the update() that bulk_update() runs inside.
+        if not (pre_save.has_listeners(model) or post_save.has_listeners(model)):
+            return original(self, *args, **kwargs)
         if _inside_guarded_call.get():
             return original(self, *args, **kwargs)
         token = _inside_guarded_call.set(True)

@@ -61,7 +61,12 @@ def _third_party_roots() -> tuple[str, ...]:
 
 
 def is_first_party(module_name: str) -> bool:
-    """True if ``module_name`` is the project's own code, not a dependency."""
+    """True if ``module_name`` is the project's own code, not a dependency.
+
+    This package never is, even when installed in editable mode.
+    """
+    if module_name == "signal_guard" or module_name.startswith("signal_guard."):
+        return False
     explicit = get_config().first_party
     if explicit is not None:
         return any(

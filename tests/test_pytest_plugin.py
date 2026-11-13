@@ -43,9 +43,9 @@ def test_quiet():
 """
 
 
-def run_inner(tmp_path, *args):
+def run_inner(tmp_path, *args, source=INNER_TESTS):
     test_file = tmp_path / "test_inner.py"
-    test_file.write_text(textwrap.dedent(INNER_TESTS))
+    test_file.write_text(textwrap.dedent(source))
     env = {
         **os.environ,
         "DJANGO_SETTINGS_MODULE": "tests.settings",
@@ -62,8 +62,7 @@ def run_inner(tmp_path, *args):
             "no:cacheprovider",
             "--rootdir",
             str(tmp_path),
-            "-c",
-            os.devnull,
+            *([] if any(a.startswith("-c") for a in args) else ["-c", os.devnull]),
             *args,
         ],
         cwd=tmp_path,
@@ -141,3 +140,146 @@ def test_current_test(monkeypatch, raw, expected):
     else:
         monkeypatch.setenv("PYTEST_CURRENT_TEST", raw)
     assert current_test() == expected
+
+
+# --- the baseline -----------------------------------------------------------
+
+BASELINE_TESTS = """
+import pytest
+from django.test import override_settings
+
+from tests.testapp.models import Order
+
+pytestmark = pytest.mark.django_db
+
+
+def test_raise_mode():
+    Order.objects.update(status="x")  # raises unless in the baseline
+
+
+@override_settings(SIGNAL_GUARD={"BYPASS": "log"})
+def test_log_mode():
+    Order.objects.bulk_create([Order()])
+"""
+
+NEW_RAISE = """
+
+def test_new_raise():
+    Order.objects.filter(pk=1).update(status="y")
+"""
+
+NEW_LOG = """
+
+@override_settings(SIGNAL_GUARD={"BYPASS": "log"})
+def test_new_log():
+    Order.objects.filter(pk=1).update(status="y")
+"""
+
+
+def write_baseline(tmp_path):
+    result = run_inner(
+        tmp_path,
+        "--signal-guard-baseline=baseline.txt",
+        "--signal-guard-update-baseline",
+        source=BASELINE_TESTS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return (tmp_path / "baseline.txt").read_text()
+
+
+def test_update_baseline_writes_every_report_and_lets_the_run_pass(tmp_path):
+    text = write_baseline(tmp_path)
+    lines = [line for line in text.splitlines() if not line.startswith("#")]
+    assert lines == [
+        "bypass | test_inner.py::test_log_mode | testapp.Order.bulk_create() skips "
+        "tests.testapp.signals.normalize_status, tests.testapp.signals.reindex_order",
+        "bypass | test_inner.py::test_raise_mode | testapp.Order.update() skips "
+        "tests.testapp.signals.normalize_status, tests.testapp.signals.reindex_order",
+    ]
+    assert "--signal-guard-update-baseline" in text  # how to regenerate
+
+
+def test_known_reports_are_silenced(tmp_path):
+    write_baseline(tmp_path)
+    result = run_inner(
+        tmp_path, "--signal-guard-baseline=baseline.txt", source=BASELINE_TESTS
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no new reports" in result.stdout
+
+
+def test_new_report_in_raise_mode_fails_its_test(tmp_path):
+    write_baseline(tmp_path)
+    result = run_inner(
+        tmp_path,
+        "--signal-guard-baseline=baseline.txt",
+        source=BASELINE_TESTS + NEW_RAISE,
+    )
+    assert result.returncode == 1
+    assert "1 failed, 2 passed" in result.stdout
+    assert "1 new report not in baseline.txt" in result.stdout
+    assert "test_inner.py::test_new_raise" in result.stdout
+
+
+def test_new_report_in_log_mode_fails_the_session(tmp_path):
+    write_baseline(tmp_path)
+    result = run_inner(
+        tmp_path,
+        "--signal-guard-baseline=baseline.txt",
+        source=BASELINE_TESTS + NEW_LOG,
+    )
+    # Every test passed, but the run fails on the new report.
+    assert "3 passed" in result.stdout
+    assert result.returncode == 1
+    assert "1 new report not in baseline.txt" in result.stdout
+
+
+def test_entries_not_seen_are_listed(tmp_path):
+    write_baseline(tmp_path)
+    result = run_inner(
+        tmp_path,
+        "--signal-guard-baseline=baseline.txt",
+        "-k",
+        "raise_mode",
+        source=BASELINE_TESTS,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 baseline entry was not seen" in result.stdout
+
+
+def test_baseline_from_ini(tmp_path):
+    write_baseline(tmp_path)
+    (tmp_path / "pytest.ini").write_text(
+        "[pytest]\nsignal_guard_baseline = baseline.txt\n"
+    )
+    result = run_inner(tmp_path, "-c", "pytest.ini", source=BASELINE_TESTS + NEW_LOG)
+    assert result.returncode == 1
+    assert "1 new report not in baseline.txt" in result.stdout
+
+
+def test_missing_baseline_file_is_an_error(tmp_path):
+    result = run_inner(
+        tmp_path, "--signal-guard-baseline=missing.txt", source=BASELINE_TESTS
+    )
+    assert result.returncode != 0
+    assert "missing.txt" in result.stderr + result.stdout
+    assert "--signal-guard-update-baseline" in result.stderr + result.stdout
+
+
+def test_summary_and_baseline_under_xdist(tmp_path):
+    pytest.importorskip("xdist")
+    write_baseline(tmp_path)
+    result = run_inner(
+        tmp_path,
+        "-n",
+        "2",
+        "--signal-guard-summary",
+        "--signal-guard-baseline=baseline.txt",
+        source=BASELINE_TESTS + NEW_LOG,
+    )
+    out = result.stdout
+    assert result.returncode == 1, out + result.stderr
+    assert "3 reports at 3 call sites." in out
+    assert "1 new report not in baseline.txt" in out
+    assert "test_inner.py::test_new_log" in out
+    assert "not seen" not in out  # both workers' reports reached the controller

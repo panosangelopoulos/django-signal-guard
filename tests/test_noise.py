@@ -37,7 +37,12 @@ def library_receivers():
 
 
 @guard()
-def test_library_receivers_are_reported_by_default(library_receivers):
+def test_global_library_receivers_are_ignored_by_default(library_receivers):
+    Tag.objects.update(name="x")
+
+
+@guard(LIBRARY_RECEIVERS="report")
+def test_library_receivers_can_all_be_reported(library_receivers):
     with pytest.raises(SignalBypassError) as caught:
         Tag.objects.update(name="x")
     assert [r.path for r in caught.value.receivers] == [
@@ -105,7 +110,17 @@ def historical(model):
 
 
 @guard()
-def test_historical_models_are_reported_by_default(connect):
+def test_historical_models_are_ignored_by_default(connect):
+    def audit_everything(sender, **kwargs):
+        pass
+
+    connect(post_save, audit_everything)
+    HistoricalTag = historical(Tag)
+    HistoricalTag.objects.bulk_create([HistoricalTag(name="a")])
+
+
+@guard(IGNORE_HISTORICAL_MODELS=False)
+def test_historical_models_can_be_reported(connect):
     def audit_everything(sender, **kwargs):
         pass
 

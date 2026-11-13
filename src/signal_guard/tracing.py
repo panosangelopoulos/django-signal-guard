@@ -16,8 +16,8 @@ variable push and pop.
 from __future__ import annotations
 
 import functools
-import gc
 import sys
+import weakref
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -28,9 +28,20 @@ from django.db.models.signals import post_delete, post_save, pre_delete, pre_sav
 from django.dispatch import Signal
 from django.dispatch.dispatcher import _make_id
 
+try:
+    from django.dispatch.dispatcher import NO_RECEIVERS
+except ImportError:  # pragma: no cover - a future Django without it
+    NO_RECEIVERS = object()  # matches nothing, so every send is traced
+
 from .conf import get_config
 from .exceptions import SignalRecursionError, SignalRecursionWarning
-from .reporting import PASS_THROUGH_MODULES, emit, find_call_site, module_matches
+from .reporting import (
+    PASS_THROUGH_MODULES,
+    code_qualname,
+    emit,
+    find_call_site,
+    module_matches,
+)
 
 ORIGINAL_ATTR = "__signal_guard_original__"
 SEND_METHODS = ("send", "send_robust")
@@ -75,7 +86,13 @@ class RunningReceiver:
 
 @dataclass(frozen=True)
 class Hop:
-    """One signal sent along a recursion chain."""
+    """One signal sent along a recursion chain, in ``SignalRecursionError.chain``.
+
+    ``target`` names the object, such as ``shop.Order #12``. ``receiver`` is
+    the receiver that sent the next signal, ``call`` how (such as
+    ``Order.save()``) and ``sent_at`` the ``file:line`` it did so from. These
+    are None for the last hop, and when the receiver could not be found.
+    """
 
     signal_name: str
     target: str
@@ -138,16 +155,7 @@ def _module_of(frame: FrameType) -> str:
 
 
 def _qualname(frame: FrameType) -> str:
-    code = frame.f_code
-    qualname = getattr(code, "co_qualname", None)  # Python 3.11+
-    if qualname is not None:
-        return qualname
-    # Python 3.10: ask the function that owns the code. Only runs when
-    # something is reported, so the search through referrers is affordable.
-    for referrer in gc.get_referrers(code):
-        if getattr(referrer, "__code__", None) is code:
-            return referrer.__qualname__
-    return code.co_name
+    return code_qualname(frame.f_code)
 
 
 def _site(frame: FrameType) -> str:
@@ -262,11 +270,13 @@ def delete_dispatch() -> tuple[str, str] | None:
 # --- recursion --------------------------------------------------------------
 
 
-def _target_label(sender: Any, instance: Any) -> str:
+def _target_label(sender: Any, instance: Any, with_pk: bool = True) -> str:
     from .registry import sender_label
 
     meta = getattr(instance, "_meta", None)
     if instance is not None and meta is not None:
+        if not with_pk:
+            return meta.label
         pk = getattr(instance, "pk", None)
         return f"{meta.label} #{pk}" if pk is not None else f"{meta.label} (unsaved)"
     label = sender_label(sender)
@@ -348,31 +358,137 @@ def _report_recursion(loop: tuple[_Dispatch, ...], current: _Dispatch) -> None:
     chain = build_chain(loop, current, frames)
     message = format_recursion(chain)
     site = find_call_site(sys._getframe(0), _NOT_USER_CODE)
+    receivers = " → ".join(h.receiver or "?" for h in chain[:-1])
+    target = _target_label(current.sender, current.instance, with_pk=False)
     emit(
         config.recursion,
         message,
         kind="recursion",
-        location=site.location,
+        site=site,
+        fingerprint=f"{chain[0].signal_name} {target}: {receivers}",
         error=lambda: SignalRecursionError(message, chain=chain),
         warning=SignalRecursionWarning,
-        stacklevel=site.stacklevel,
         extra={"signal_guard_chain": [h.receiver for h in chain]},
+        stops=True,
     )
 
 
 # --- installing -------------------------------------------------------------
 
 
+class SentSignal:
+    """One signal sent while ``capture_signals()`` was recording."""
+
+    __slots__ = ("_responses", "kwargs", "sender", "signal")
+
+    def __init__(self, signal: Signal, sender: Any, kwargs: dict[str, Any]) -> None:
+        self.signal = signal
+        self.sender = sender
+        self.kwargs = kwargs
+        self._responses: list[tuple[Any, Any]] = []
+
+    @property
+    def signal_name(self) -> str:
+        """The signal's name, such as ``post_save``."""
+        return signal_name(self.signal)
+
+    @property
+    def instance(self) -> Any:
+        return self.kwargs.get("instance")
+
+    @property
+    def responses(self) -> list[tuple[str, Any]]:
+        """``(receiver path, return value)`` for each receiver that ran.
+
+        From ``send_robust()``, a return value may be the exception raised.
+        Empty if a receiver raised during ``send()``.
+        """
+        from .receivers import describe
+
+        return [(describe("", r).path, value) for r, value in self._responses]
+
+    def __repr__(self) -> str:
+        from .registry import sender_label
+
+        return f"<SentSignal {self.signal_name} from {sender_label(self.sender)}>"
+
+
+_names: weakref.WeakKeyDictionary[Signal, str] = weakref.WeakKeyDictionary()
+
+
+def signal_name(signal: Signal) -> str:
+    """A signal's short name, such as ``post_save``. Slow the first time."""
+    try:
+        return _names[signal]
+    except KeyError:
+        name = _signal_names({signal})[signal]
+        _names[signal] = name
+        return name
+
+
+class SignalCapture:
+    def __init__(self, signals: tuple[Signal, ...], sender: Any) -> None:
+        self.signals = signals
+        self.sender = sender
+        self.sent: list[SentSignal] = []
+
+    def wants(self, signal: Signal, sender: Any) -> bool:
+        if self.signals and not any(signal is s for s in self.signals):
+            return False
+        return self.sender is None or sender is self.sender
+
+
+# How many signal captures are open, in any context: one global read keeps
+# send() cheap when nothing is being captured.
+_open_signal_captures = 0
+_signal_captures: ContextVar[tuple[SignalCapture, ...]] = ContextVar(
+    "signal_guard_signal_captures", default=()
+)
+
+
+def start_signal_capture(capture: SignalCapture) -> Any:
+    global _open_signal_captures
+    _open_signal_captures += 1
+    return _signal_captures.set((*_signal_captures.get(), capture))
+
+
+def stop_signal_capture(token: Any) -> None:
+    global _open_signal_captures
+    _open_signal_captures -= 1
+    _signal_captures.reset(token)
+
+
+def _recorded(signal: Signal, sender: Any, named: dict[str, Any]) -> list[SentSignal]:
+    entries = []
+    for capture in _signal_captures.get():
+        if capture.wants(signal, sender):
+            entry = SentSignal(signal, sender, dict(named))
+            capture.sent.append(entry)
+            entries.append(entry)
+    return entries
+
+
 def _wrap(original: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(original)
     def send(self: Signal, sender: Any, **named: Any) -> Any:
-        if not self.receivers:
-            return original(self, sender, **named)
-        token = _push(self, sender, named, sys._getframe(0))
-        try:
-            return original(self, sender, **named)
-        finally:
-            _stack.reset(token)
+        entries = _recorded(self, sender, named) if _open_signal_captures else None
+        # Django's own shortcut: no receiver will run, so there is nothing to
+        # trace. The cache only says so once send() has run for this sender.
+        if (
+            not self.receivers
+            or self.sender_receivers_cache.get(sender) is NO_RECEIVERS
+        ):
+            result = original(self, sender, **named)
+        else:
+            token = _push(self, sender, named, sys._getframe(0))
+            try:
+                result = original(self, sender, **named)
+            finally:
+                _stack.reset(token)
+        if entries:
+            for entry in entries:
+                entry._responses = list(result)
+        return result
 
     setattr(send, ORIGINAL_ATTR, original)
     return send
@@ -381,13 +497,22 @@ def _wrap(original: Callable[..., Any]) -> Callable[..., Any]:
 def _wrap_async(original: Callable[..., Any]) -> Callable[..., Any]:
     @functools.wraps(original)
     async def asend(self: Signal, sender: Any, **named: Any) -> Any:
-        if not self.receivers:
-            return await original(self, sender, **named)
-        token = _push(self, sender, named, sys._getframe(0))
-        try:
-            return await original(self, sender, **named)
-        finally:
-            _stack.reset(token)
+        entries = _recorded(self, sender, named) if _open_signal_captures else None
+        if (
+            not self.receivers
+            or self.sender_receivers_cache.get(sender) is NO_RECEIVERS
+        ):
+            result = await original(self, sender, **named)
+        else:
+            token = _push(self, sender, named, sys._getframe(0))
+            try:
+                result = await original(self, sender, **named)
+            finally:
+                _stack.reset(token)
+        if entries:
+            for entry in entries:
+                entry._responses = list(result)
+        return result
 
     setattr(asend, ORIGINAL_ATTR, original)
     return asend
