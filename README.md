@@ -558,7 +558,8 @@ flowchart LR
 | 0.1 | Bypass guard | ✅ |
 | 0.2 | System checks W001–W004, `manage.py signal_map`, `signals.lock` | ✅ |
 | 0.3 | Recursion tracing, `@receiver_on_commit`, a check for side effects before commit | ✅ |
-| 1.0 | pytest plugin and test assertions, full documentation | 🔜 |
+| 0.4 | Noise controls for large projects, `allow_side_effect`, `pytest --signal-guard-summary` | ✅ |
+| 1.0 | Test assertions, full documentation | 🔜 |
 
 See the [changelog](https://github.com/panosangelopoulos/django-signal-guard/blob/main/CHANGELOG.md) for details.
 

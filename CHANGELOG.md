@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-11-13)
 
 Added, all off by default, to cut noise on large projects:
 
