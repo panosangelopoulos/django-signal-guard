@@ -10,6 +10,7 @@ import weakref
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
+from pathlib import PurePath
 from typing import Any, TypeVar
 
 from django.conf import settings
@@ -181,12 +182,34 @@ def _base_dir() -> str | None:
 
 @functools.lru_cache(maxsize=4096)
 def _relative_to_project(filename: str, cwd: str, base_dir: str | None) -> str:
-    for root in (cwd, base_dir):
-        if root:
-            found = _relative_to(filename, root)
+    roots = [root for root in (cwd, base_dir) if root]
+    for root in roots:
+        found = _relative_to(filename, root)
+        if found is not None:
+            return found
+    if os.path.isabs(filename) and not os.path.exists(filename):
+        for root in roots:
+            found = _moved_into(filename, root)
             if found is not None:
                 return found
     return filename
+
+
+def _moved_into(filename: str, root: str) -> str | None:
+    """The file under ``root`` that ``filename``, which does not exist, names.
+
+    Code compiled on another machine keeps that machine's paths. pytest
+    before 9.2 reuses its cached rewritten test modules without correcting
+    them, so a container that shares the project folder with the host can
+    see /Users/me/project/conftest.py. The longest end of the path that is a
+    file under ``root`` is taken to be the same file.
+    """
+    parts = PurePath(filename).parts[1:]  # without the root or drive
+    for start in range(len(parts)):
+        candidate = os.path.join(*parts[start:])
+        if os.path.isfile(os.path.join(root, candidate)):
+            return candidate
+    return None
 
 
 def _relative_to(filename: str, root: str) -> str | None:

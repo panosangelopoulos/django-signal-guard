@@ -36,6 +36,24 @@ def test_path_reached_through_a_symlink(tmp_path, monkeypatch):
     assert relative_path(str(link / "app" / "conftest.py")) == expected
 
 
+def test_path_compiled_on_another_machine(tmp_path, monkeypatch):
+    # pytest before 9.2 reuses a rewritten conftest.py compiled on the host,
+    # host path and all, in a container that mounts the project elsewhere.
+    project = tmp_path / "app"
+    (project / "tests").mkdir(parents=True)
+    (project / "conftest.py").write_text("")
+    (project / "tests" / "conftest.py").write_text("")
+    monkeypatch.chdir(project)
+
+    host = tmp_path / "host" / "me" / "project"
+    assert relative_path(str(host / "tests" / "conftest.py")) == os.path.join(
+        "tests", "conftest.py"
+    )
+    assert relative_path(str(host / "conftest.py")) == "conftest.py"
+    gone = str(host / "tests" / "deleted.py")
+    assert relative_path(gone) == gone
+
+
 def test_path_under_base_dir_when_run_from_elsewhere(tmp_path, monkeypatch):
     project = tmp_path / "project"
     (project / "app").mkdir(parents=True)

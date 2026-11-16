@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.1 (2026-11-16)
+
+Fixed:
+
+- Side-effect reports and recursion chains name a decorated receiver after
+  its function, not the decorator's wrapper (such as
+  `disable_for_loaddata.<locals>.wrapper`), when the decorator uses
+  `functools.wraps`. `IGNORE_RECEIVERS` and baselines now see the real name,
+  so receivers that share a decorator are told apart. A receiver of yours
+  behind a decorator from an installed package was taken for library code,
+  and its side effects went unreported; they are reported now.
+- Paths in reports stay relative to the project for code compiled on another
+  machine. pytest before 9.2 reuses the rewritten test modules it cached on
+  the host, so a baseline written in a container that mounts the project
+  could get host paths such as `/Users/me/project/conftest.py`, which match
+  nowhere else.
+
+If your baseline has entries naming a `<locals>.wrapper` receiver or an
+absolute path, regenerate it after upgrading:
+`pytest --signal-guard-baseline=FILE --signal-guard-update-baseline`.
+
 ## 1.0.0 (2026-11-13)
 
 The first stable release. From here on, the public API follows semantic

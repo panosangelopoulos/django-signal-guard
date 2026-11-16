@@ -210,9 +210,43 @@ def _receiver_between(
     return None, between
 
 
-def _describe_receiver(frame: FrameType) -> RunningReceiver:
-    from .receivers import relative_path
+def _called_receiver(frame: FrameType) -> Any:
+    """The receiver object the dispatcher called to run ``frame``, if found.
 
+    The frame alone names the function that runs, which for a decorated
+    receiver is the decorator's wrapper, such as
+    ``disable_for_loaddata.<locals>.wrapper``. The object carries the real
+    name, copied by ``functools.wraps``, and the function in ``__wrapped__``.
+    """
+    called = frame
+    while (back := called.f_back) is not None:
+        if _module_of(back) == _DISPATCHER_MODULE:
+            break
+        called = back
+    else:
+        return None
+    # Signal.send() and friends hold the receiver they are calling in a local.
+    receiver = back.f_locals.get("receiver")
+    target = receiver
+    while isinstance(target, functools.partial):
+        target = target.func
+    target = getattr(target, "__func__", target)  # bound method -> function
+    if getattr(target, "__code__", None) is not called.f_code:
+        return None  # not what that frame runs, such as a callable instance
+    return receiver
+
+
+def _describe_receiver(frame: FrameType) -> RunningReceiver:
+    from .receivers import describe, relative_path
+
+    receiver = _called_receiver(frame)
+    if receiver is not None:
+        described = describe("", receiver)
+        return RunningReceiver(
+            path=described.path,
+            location=described.location,
+            module=described.module,
+        )
     code = frame.f_code
     module = _module_of(frame)
     return RunningReceiver(

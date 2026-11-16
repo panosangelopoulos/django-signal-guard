@@ -1,3 +1,4 @@
+import functools
 import logging
 import sys
 import warnings
@@ -22,6 +23,7 @@ from signal_guard import (
 )
 from signal_guard.side_effects import TASK, Target, _celery, uncommitted_alias
 from tests.fakevendor import sdk
+from tests.fakevendor.decorators import skip_raw
 from tests.testapp import webhooks
 from tests.testapp.models import Invoice
 
@@ -339,6 +341,55 @@ def test_ignore_receivers(connect):
     with transaction.atomic():
         Invoice.objects.create()
     assert len(mail.outbox) == 1
+
+
+def disable_for_loaddata(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        if kwargs.get("raw"):
+            return None
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@disable_for_loaddata
+def email_customer_unless_loaddata(sender, instance, **kwargs):
+    send_mail("Thanks", "Your invoice", None, [instance.email])
+
+
+@skip_raw
+def email_customer_with_vendor_decorator(sender, instance, **kwargs):
+    send_mail("Thanks", "Your invoice", None, [instance.email])
+
+
+@RAISE
+def test_decorated_receiver_is_named_after_the_function(connect):
+    connect(post_save, email_customer_unless_loaddata, sender=Invoice)
+    with pytest.raises(SideEffectBeforeCommitError) as caught, transaction.atomic():
+        Invoice.objects.create()
+
+    path = "tests.test_side_effects.email_customer_unless_loaddata"
+    assert caught.value.receiver == path
+    code = email_customer_unless_loaddata.__wrapped__.__code__
+    assert f"  receiver   {path}  ({THIS_FILE}:{code.co_firstlineno})" in str(
+        caught.value
+    )
+
+
+def test_receiver_behind_a_library_decorator_is_still_first_party(connect):
+    connect(post_save, email_customer_with_vendor_decorator, sender=Invoice)
+    settings = {"SIDE_EFFECTS": "raise", "FIRST_PARTY": ["tests.test_side_effects"]}
+    with (
+        override_settings(SIGNAL_GUARD=settings),
+        pytest.raises(SideEffectBeforeCommitError) as caught,
+        transaction.atomic(),
+    ):
+        Invoice.objects.create()
+
+    assert caught.value.receiver == (
+        "tests.test_side_effects.email_customer_with_vendor_decorator"
+    )
 
 
 def test_third_party_receivers_need_check_library_calls(connect):

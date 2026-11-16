@@ -1,3 +1,4 @@
+import functools
 import logging
 import warnings
 
@@ -30,6 +31,20 @@ def save_until_four(sender, instance, **kwargs):
         instance.save()
 
 
+def logged(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+
+@logged
+def save_forever_logged(sender, instance, **kwargs):
+    instance.value += 1
+    instance.save()
+
+
 def test_tracing_is_installed():
     assert is_installed()
     assert not is_dispatching()
@@ -48,6 +63,21 @@ def test_infinite_loop_is_stopped_on_the_third_entry(connect):
     assert hop.signal_name == "post_save"
     assert hop.target.startswith("testapp.Counter #")
     assert hop.receiver == "tests.test_tracing.save_forever"
+    assert hop.call == "Counter.save()"
+    assert hop.sent_at.startswith(f"{THIS_FILE}:")
+
+
+@RAISE
+def test_decorated_receiver_is_named_after_the_function(connect):
+    connect(post_save, save_forever_logged, sender=Counter)
+
+    with pytest.raises(SignalRecursionError) as caught:
+        Counter.objects.create()
+
+    hop = caught.value.chain[0]
+    assert hop.receiver == "tests.test_tracing.save_forever_logged"
+    code = save_forever_logged.__wrapped__.__code__
+    assert hop.receiver_location == f"{THIS_FILE}:{code.co_firstlineno}"
     assert hop.call == "Counter.save()"
     assert hop.sent_at.startswith(f"{THIS_FILE}:")
 
